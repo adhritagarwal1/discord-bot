@@ -6,13 +6,32 @@ from discord.ext import commands
 import google.generativeai as genai
 from PIL import Image
 from dotenv import load_dotenv
-
+from flask import Flask
+from threading import Thread
 # ==========================================
 # 1. SETUP & CONFIGURATION
 # ==========================================
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 GEMINI_KEY = os.getenv('GEMINI_API_KEY')
+app = Flask("")
+@app.route('/')
+def main():
+    return "TradeSight AI Bot is alive!"
+
+def run():
+    # Retrieve Render's assigned port
+    port = int(os.environ.get('PORT', 10000))
+    # CRITICAL: host MUST be '0.0.0.0'
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    server = Thread(target=run)
+    server.start()
+
+# Call keep_alive() BEFORE client.run(DISCORD_TOKEN)
+keep_alive()
+client.run(os.environ.get('DISCORD_TOKEN'))
 
 # Configure Gemini
 genai.configure(api_key=GEMINI_KEY)
