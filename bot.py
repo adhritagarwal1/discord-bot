@@ -136,7 +136,7 @@ async def on_message(message: discord.Message):
             
             # Native Async Gemini API Call
             response = await genai_client.aio.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.6-flash",
                 contents=[img, full_prompt]
             )
 
