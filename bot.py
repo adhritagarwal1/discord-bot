@@ -129,10 +129,16 @@ async def on_message(message: discord.Message):
         # Strict RAM Management: Use Image context manager
         with Image.open(io.BytesIO(image_bytes)) as img:
             full_prompt = (
-                f"You are a professional trading analyst. Apply the following strategy to analyze this chart:\n"
-                f"Strategy: {user_strategy}\n\n"
-                f"Provide a clear, structured breakdown including Trade Bias (Long/Short/Neutral), Key Levels, and Setup Quality."
-            )
+    f"You are an objective trade journal assistant. Analyze this chart screenshot STRICTLY against the user's defined strategy.\n"
+    f"User's Strategy Rules: {user_strategy}\n\n"
+    f"CRITICAL RESTRICTION: DO NOT give trade signals, entry prices, stop-loss levels, take-profit targets, or financial advice. "
+    f"You are not a signal provider. Your job is purely descriptive and analytical for a personal journal: "
+    f"break down what price action occurred, how it interacted with the chart, and whether it matched the user's strategy rules.\n\n"
+    f"Provide a structured breakdown:\n"
+    f"1. **Price Action Context**: What happened in this chart session.\n"
+    f"2. **Strategy Evaluation**: Did the setup align with the user's defined strategy rules?\n"
+    f"3. **Execution Summary**: A brief, factual summary of the trade setup for the journal."
+)
             
             # Native Async Gemini API Call
             response = await genai_client.aio.models.generate_content(
