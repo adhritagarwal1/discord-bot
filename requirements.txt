@@ -1,5 +1,5 @@
 discord.py
 google-genai
-python-dotenv
+aiosqlite
 pillow
 flask
