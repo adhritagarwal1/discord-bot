@@ -3,3 +3,4 @@ google-genai
 aiosqlite
 pillow
 flask
+python-dotenv
