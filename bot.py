@@ -300,7 +300,7 @@ async def find_my_edge(interaction: discord.Interaction):
     try:
         # Native Async Gemini Call
         response = await genai_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=prompt
         )
 
