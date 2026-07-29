@@ -628,6 +628,11 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
+    if not await is_premium_member(message.author.id):
+        await message.channel.send(build_upgrade_message())
+        await bot.process_commands(message)
+        return
+
     now = time.time()
     last_call = _last_chart_analysis_at.get(message.author.id, 0)
     if now - last_call < CHART_COOLDOWN_SECONDS:
@@ -715,6 +720,10 @@ async def on_message(message: discord.Message):
 @app_commands.allowed_installs(guilds=True, users=False)
 async def set_strategy(interaction: discord.Interaction, strategy: str):
     await interaction.response.defer(ephemeral=True)
+
+    if not await is_premium_member(interaction.user.id):
+        await interaction.followup.send(build_upgrade_message(), ephemeral=True)
+        return
 
     if len(strategy) > MAX_STRATEGY_LENGTH:
         await interaction.followup.send(
@@ -804,6 +813,62 @@ async def find_my_edge(interaction: discord.Interaction):
     except Exception as e:
         logging.error(f"Error generating edge audit: {e}")
         await interaction.followup.send("❌ Couldn't generate your edge audit right now. Please try again shortly.")
+
+
+@bot.tree.command(name="viewlogs", description="View your recent logged trades.")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.allowed_installs(guilds=True, users=False)
+async def view_logs(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    if not await is_premium_member(interaction.user.id):
+        await interaction.followup.send(build_upgrade_message(), ephemeral=True)
+        return
+
+    trades = await db.fetchall(
+        "SELECT status, result, direction, entry, stop_loss, take_profit, matches_strategy, note, session, risk_reward, timestamp "
+        "FROM trades WHERE user_id = ? ORDER BY id DESC LIMIT 10",
+        (interaction.user.id,),
+    )
+
+    if not trades:
+        await interaction.followup.send(
+            "⚠️ You don't have any logged trades yet. Drop a chart screenshot in my DMs to log your first trade!",
+            ephemeral=True,
+        )
+        return
+
+    embed = discord.Embed(title="📊 Your Recent Trade Logs", color=discord.Color.blurple())
+    avatar_url = interaction.user.display_avatar.url if getattr(interaction.user, "display_avatar", None) else None
+    embed.set_author(name=getattr(interaction.user, "display_name", str(interaction.user)), icon_url=avatar_url)
+
+    for idx, (status, result, direction, entry, stop_loss, take_profit, matches_strategy, note, session, risk_reward, timestamp) in enumerate(trades, 1):
+        if result == "WIN":
+            status_icon = "🟢 WIN"
+        elif result == "LOSS":
+            status_icon = "🔴 LOSS"
+        else:
+            status_icon = "⏳ PENDING"
+
+        if matches_strategy is True:
+            match_icon = "✅"
+        elif matches_strategy is False:
+            match_icon = "❌"
+        else:
+            match_icon = "❔"
+
+        rr_text = f"1:{risk_reward}" if risk_reward is not None else "—"
+
+        field_value = (
+            f"**Direction:** {direction or 'Unclear'} | **Session:** {session or 'Unclear'}\n"
+            f"**Entry:** {entry or '—'} | **SL:** {stop_loss or '—'} | **TP:** {take_profit or '—'}\n"
+            f"**R:R:** {rr_text} | **Strategy:** {match_icon}\n"
+            f"**Note:** {_truncate(note, 80)}"
+        )
+        embed.add_field(name=f"Trade #{idx} ({status_icon})", value=field_value, inline=False)
+
+    embed.set_footer(text=f"Showing your last {len(trades)} logged trades")
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.error
