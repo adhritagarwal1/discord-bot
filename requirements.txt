@@ -4,3 +4,4 @@ aiosqlite
 pillow
 flask
 python-dotenv
+asyncpg
