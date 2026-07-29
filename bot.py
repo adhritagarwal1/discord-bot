@@ -805,10 +805,15 @@ async def view_logs(interaction: discord.Interaction):
         await interaction.followup.send(build_upgrade_message(), ephemeral=True)
         return
 
+    # Subquery fetches the 10 most recent trades descending, then orders them ascendingly
+    # so Trade #1 is the oldest of the recent set and chronological order is preserved.
     trades = await db.fetchall(
         "SELECT message_id, status, result, direction, entry, stop_loss, take_profit, "
-        "matches_strategy, note, session, risk_reward, timestamp "
-        "FROM trades WHERE user_id = ? ORDER BY id DESC LIMIT 10",
+        "matches_strategy, note, session, risk_reward, timestamp FROM ("
+        "SELECT message_id, status, result, direction, entry, stop_loss, take_profit, "
+        "matches_strategy, note, session, risk_reward, timestamp, id "
+        "FROM trades WHERE user_id = ? ORDER BY id DESC LIMIT 10"
+        ") t ORDER BY t.id ASC",
         (interaction.user.id,)
     )
 
@@ -829,6 +834,103 @@ async def view_logs(interaction: discord.Interaction):
         embed.add_field(name=f"Trade #{idx}", value=details, inline=False)
 
     await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="stats", description="View your overall trading statistics and win rate breakdown.")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.allowed_installs(guilds=True, users=False)
+async def stats_command(interaction: discord.Interaction):
+    if interaction.guild is not None:
+        await interaction.response.send_message(
+            "❌ This bot can only be used in Direct Messages (DMs)!", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    if not await is_premium_member(interaction.user.id):
+        await interaction.followup.send(build_upgrade_message(), ephemeral=True)
+        return
+
+    trades = await db.fetchall(
+        "SELECT result, direction, entry, stop_loss, take_profit, note, session, risk_reward "
+        "FROM trades WHERE user_id = ? AND status = 'COMPLETED'",
+        (interaction.user.id,)
+    )
+
+    if not trades:
+        await interaction.followup.send("⚠️ No completed trades found to calculate stats.", ephemeral=True)
+        return
+
+    s = compute_stats(trades)
+    embed = discord.Embed(title="📊 Trading Statistics", color=discord.Color.green())
+    embed.add_field(name="Total Completed Trades", value=str(s['total']), inline=True)
+    embed.add_field(name="Win Rate", value=f"{s['win_rate']}% ({s['wins']}W / {s['losses']}L)", inline=True)
+    if s['avg_rr_win'] is not None:
+        embed.add_field(name="Avg R:R (Wins)", value=f"1:{s['avg_rr_win']}", inline=True)
+
+    if s['direction_breakdown']:
+        dir_text = ", ".join(f"{k}: {v}%" for k, v in s['direction_breakdown'].items())
+        embed.add_field(name="Win Rate by Direction", value=dir_text, inline=False)
+
+    if s['session_breakdown']:
+        sess_text = ", ".join(f"{k}: {v}%" for k, v in s['session_breakdown'].items())
+        embed.add_field(name="Win Rate by Session", value=sess_text, inline=False)
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="deletelast", description="Delete your most recently logged trade.")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.allowed_installs(guilds=True, users=False)
+async def delete_last(interaction: discord.Interaction):
+    if interaction.guild is not None:
+        await interaction.response.send_message(
+            "❌ This bot can only be used in Direct Messages (DMs)!", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    if not await is_premium_member(interaction.user.id):
+        await interaction.followup.send(build_upgrade_message(), ephemeral=True)
+        return
+
+    last_trade = await db.fetchone(
+        "SELECT id, direction, entry FROM trades WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+        (interaction.user.id,)
+    )
+
+    if not last_trade:
+        await interaction.followup.send("⚠️ You have no logged trades to delete.", ephemeral=True)
+        return
+
+    db_id, direction, entry = last_trade
+    await db.execute("DELETE FROM trades WHERE id = ?", (db_id,))
+    await interaction.followup.send(
+        f"🗑️ Deleted your last logged trade (`{direction or 'Trade'}`, Entry: `{entry or '-'}`).",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="help", description="Show all available TradeSight AI commands.")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.allowed_installs(guilds=True, users=False)
+async def help_command(interaction: discord.Interaction):
+    if interaction.guild is not None:
+        await interaction.response.send_message(
+            "❌ This bot can only be used in Direct Messages (DMs)!", ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(title="🤖 TradeSight AI - Help & Commands", color=discord.Color.blue())
+    embed.add_field(name="📸 Chart Logging", value="Send any chart screenshot directly in my DMs to automatically log the setup, entry, stop loss, and take profit.", inline=False)
+    embed.add_field(name="/setstrategy", value="Set your custom trading strategy rules for chart evaluation.", inline=False)
+    embed.add_field(name="/viewlogs", value="View your recent logged trades and their current statuses.", inline=False)
+    embed.add_field(name="/stats", value="View your overall win rate, session breakdowns, and performance metrics.", inline=False)
+    embed.add_field(name="/findmyedge", value="Analyze your last 10 completed trades to find your core edge and leaks.", inline=False)
+    embed.add_field(name="/deletelast", value="Delete your most recently logged trade.", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.error
