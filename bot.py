@@ -628,11 +628,6 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    if not await is_premium_member(message.author.id):
-        await message.channel.send(build_upgrade_message())
-        await bot.process_commands(message)
-        return
-
     now = time.time()
     last_call = _last_chart_analysis_at.get(message.author.id, 0)
     if now - last_call < CHART_COOLDOWN_SECONDS:
@@ -720,10 +715,6 @@ async def on_message(message: discord.Message):
 @app_commands.allowed_installs(guilds=True, users=False)
 async def set_strategy(interaction: discord.Interaction, strategy: str):
     await interaction.response.defer(ephemeral=True)
-
-    if not await is_premium_member(interaction.user.id):
-        await interaction.followup.send(build_upgrade_message(), ephemeral=True)
-        return
 
     if len(strategy) > MAX_STRATEGY_LENGTH:
         await interaction.followup.send(
