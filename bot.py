@@ -44,9 +44,6 @@ WHOP_CHECKOUT_URL = os.getenv("WHOP_CHECKOUT_URL", "")  # Optional: shown in the
 if not DISCORD_TOKEN or not GEMINI_API_KEY:
     raise ValueError("Missing critical environment variables (DISCORD_TOKEN or GEMINI_API_KEY).")
 
-# HOME_GUILD_ID / PREMIUM_ROLE_ID are required now that every feature is gated by a Whop-synced
-# Discord role. Since customers talk to the bot over DM, we can't rely on interaction.guild to
-# find their roles -- we always look them up in this specific guild.
 try:
     HOME_GUILD_ID = int(os.getenv("HOME_GUILD_ID", ""))
     PREMIUM_ROLE_ID = int(os.getenv("PREMIUM_ROLE_ID", ""))
@@ -59,25 +56,21 @@ except ValueError:
 genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 GEMINI_MODEL = "gemini-3.6-flash"
-GEMINI_MAX_RETRIES = 2  # total attempts = this + 1, with exponential backoff
+GEMINI_MAX_RETRIES = 2
 
-CHART_COOLDOWN_SECONDS = 15       # per-user cooldown between chart analyses
-FINDMYEDGE_COOLDOWN_SECONDS = 60  # per-user cooldown on /findmyedge
-MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB -- protects RAM on constrained hosts
+CHART_COOLDOWN_SECONDS = 15
+FINDMYEDGE_COOLDOWN_SECONDS = 60
+MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB
 MAX_STRATEGY_LENGTH = 500
 
 MIN_TRADES_FOR_EDGE = 3
-EDGE_LOOKBACK = 10  # /findmyedge only ever looks at the last 10 completed trades
+EDGE_LOOKBACK = 10
 
 SQLITE_DB_PATH = "tradesight.db"
 
-# Per-user cooldown tracking for chart analysis (in-memory, resets on restart -- fine for this use)
 _last_chart_analysis_at = {}
-
-# Premium-membership lookups hit the Discord API (guild.fetch_member), so cache briefly to
-# avoid hammering it every time a customer sends a chart in DM.
 PREMIUM_CACHE_TTL_SECONDS = 60
-_premium_cache = {}  # user_id -> (is_premium: bool, checked_at: float)
+_premium_cache = {}
 
 # -------------------------------------------------------------------
 # RENDER KEEP-ALIVE SERVER (FLASK)
@@ -102,16 +95,10 @@ threading.Thread(target=run_flask, daemon=True).start()
 # -------------------------------------------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
-# "members" is a privileged intent -- must also be enabled for this bot
-# in the Discord Developer Portal, or the /findmyedge premium check will fail silently.
 intents.members = True
 
 # -------------------------------------------------------------------
 # DATABASE LAYER
-# Supports SQLite (default, zero-config) or Postgres (set DATABASE_URL) so trade
-# history survives redeploys/restarts. Render's free/starter disks are ephemeral --
-# a SQLite file there gets wiped on every redeploy. Point DATABASE_URL at a Postgres
-# instance (Render offers a free tier) for real persistence.
 # -------------------------------------------------------------------
 SQLITE_STRATEGIES_TABLE = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -165,12 +152,6 @@ CREATE TABLE IF NOT EXISTS trades (
 
 
 class Database:
-    """Thin async wrapper that dispatches to Postgres (asyncpg) if DATABASE_URL is
-    set, otherwise falls back to local SQLite. Queries are always written with
-    '?' placeholders; they're translated to '$1, $2, ...' for Postgres internally,
-    so calling code never needs to know which backend is active.
-    """
-
     def __init__(self):
         self.use_postgres = bool(DATABASE_URL)
         self.pool = None
@@ -183,7 +164,7 @@ class Database:
 
     async def init(self):
         if self.use_postgres:
-            import asyncpg  # lazy import -- only required when Postgres is actually used
+            import asyncpg
             self.pool = await asyncpg.create_pool(DATABASE_URL, ssl="require")
             async with self.pool.acquire() as conn:
                 await conn.execute(PG_STRATEGIES_TABLE)
@@ -192,12 +173,11 @@ class Database:
             async with aiosqlite.connect(SQLITE_DB_PATH) as conn:
                 await conn.execute(SQLITE_STRATEGIES_TABLE)
                 await conn.execute(SQLITE_TRADES_TABLE)
-                # Best-effort migration for bots upgraded from the pre-session/R:R schema
                 for col, coltype in (("session", "TEXT"), ("risk_reward", "REAL")):
                     try:
                         await conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {coltype}")
                     except Exception:
-                        pass  # column already exists
+                        pass
                 await conn.commit()
         logging.info(f"Database ready ({'Postgres' if self.use_postgres else 'SQLite'}).")
 
@@ -244,14 +224,9 @@ class Database:
 db = Database()
 
 # -------------------------------------------------------------------
-# PREMIUM / SUBSCRIPTION GATING (Whop -> Discord role sync)
+# PREMIUM / SUBSCRIPTION GATING
 # -------------------------------------------------------------------
 async def is_premium_member(user_id: int) -> bool:
-    """Checks whether user_id currently holds PREMIUM_ROLE_ID in HOME_GUILD_ID.
-    Whop's native Discord integration adds/removes that role automatically as
-    subscriptions start/lapse, so this is the single source of truth -- no
-    separate billing webhook needed.
-    """
     now = time.time()
     cached = _premium_cache.get(user_id)
     if cached and now - cached[1] < PREMIUM_CACHE_TTL_SECONDS:
@@ -286,10 +261,6 @@ def build_upgrade_message() -> str:
 # HELPERS -- SESSION TAGGING & RISK:REWARD
 # -------------------------------------------------------------------
 def get_trading_session(dt_utc) -> str:
-    """Tags a trade by UTC hour rather than asking the vision model to guess it
-    from the screenshot -- chart images rarely show a reliable timestamp, but the
-    Discord message timestamp always is one.
-    """
     hour = dt_utc.hour
     sessions = []
     if 0 <= hour < 9:
@@ -306,7 +277,7 @@ def try_parse_price(text) -> float | None:
         return None
     if text.strip().lower() in ("unclear", "n/a", "-", ""):
         return None
-    cleaned = re.sub(r"[^\d.\-]", "", text)  # drop currency symbols, commas, etc.
+    cleaned = re.sub(r"[^\d.\-]", "", text)
     try:
         return float(cleaned)
     except ValueError:
@@ -337,9 +308,6 @@ def _truncate(text: str, limit: int = 1000) -> str:
 # GEMINI HELPERS
 # -------------------------------------------------------------------
 async def call_gemini(contents, config=None):
-    """Wraps generate_content with a couple of retries and exponential backoff,
-    so a transient Gemini error/rate-limit doesn't just fail the whole request.
-    """
     last_err = None
     for attempt in range(GEMINI_MAX_RETRIES + 1):
         try:
@@ -355,7 +323,6 @@ async def call_gemini(contents, config=None):
 
 
 def build_chart_prompt(user_strategy: str) -> str:
-    """Minimal, structured prompt. No narrative price-action essays."""
     return (
         "You are a trade-logging assistant. You are NOT a signal provider and must NEVER "
         "recommend a future trade. This screenshot shows a trade the user has already taken "
@@ -372,7 +339,6 @@ def build_chart_prompt(user_strategy: str) -> str:
 
 
 def parse_trade_json(raw_text: str) -> dict:
-    """Safely parse Gemini's JSON reply, with a graceful fallback."""
     fallback = {
         "direction": "Unclear",
         "entry": "Unclear",
@@ -406,7 +372,6 @@ def parse_trade_json(raw_text: str) -> dict:
 
 
 def parse_edge_sections(raw_text: str) -> dict:
-    """Parses the CORE_EDGE / PRIMARY_LEAK / ACTION_PLAN labeled response into a dict."""
     sections = {"core_edge": "", "primary_leak": "", "action_plan": ""}
     patterns = {
         "core_edge": r"CORE_EDGE:\s*(.*?)(?=PRIMARY_LEAK:|ACTION_PLAN:|$)",
@@ -429,7 +394,6 @@ def parse_edge_sections(raw_text: str) -> dict:
 
 
 def compute_stats(trades: list) -> dict:
-    """trades: list of (result, direction, entry, stop_loss, take_profit, note, session, risk_reward)"""
     total = len(trades)
     wins = [t for t in trades if t[0] == "WIN"]
     losses = [t for t in trades if t[0] == "LOSS"]
@@ -524,14 +488,9 @@ def build_edge_embed(user, stats: dict, sections: dict, trades_count: int) -> di
 
 
 # -------------------------------------------------------------------
-# PERSISTENT UI -- WIN/LOSS BUTTONS (replaces emoji reactions)
+# PERSISTENT UI -- WIN/LOSS BUTTONS
 # -------------------------------------------------------------------
 class TradeResultView(discord.ui.View):
-    """Buttons instead of reactions: clearer affordance, disables the ambiguity of
-    reaction removal, and survives bot restarts since it's registered as a
-    persistent view with static custom_ids.
-    """
-
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -591,7 +550,7 @@ class TradeResultView(discord.ui.View):
 class TradeSightBot(commands.Bot):
     async def setup_hook(self):
         await db.init()
-        self.add_view(TradeResultView())  # register persistent view once, before login
+        self.add_view(TradeResultView())
 
 
 bot = TradeSightBot(command_prefix="!", intents=intents)
@@ -619,7 +578,6 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # STEP 2 FIX: If the message was sent in a server (guild), ignore it completely!
     if message.guild is not None:
         return
 
@@ -723,7 +681,6 @@ async def on_message(message: discord.Message):
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.allowed_installs(guilds=True, users=False)
 async def set_strategy(interaction: discord.Interaction, strategy: str):
-    # STEP 3 FIX: Block slash command if used inside a server channel
     if interaction.guild is not None:
         await interaction.response.send_message(
             "❌ This bot can only be used in Direct Messages (DMs)!", ephemeral=True
@@ -759,7 +716,6 @@ async def set_strategy(interaction: discord.Interaction, strategy: str):
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.allowed_installs(guilds=True, users=False)
 async def find_my_edge(interaction: discord.Interaction):
-    # STEP 3 FIX: Block slash command if used inside a server channel
     if interaction.guild is not None:
         await interaction.response.send_message(
             "❌ This bot can only be used in Direct Messages (DMs)!", ephemeral=True
@@ -831,6 +787,48 @@ async def find_my_edge(interaction: discord.Interaction):
     except Exception as e:
         logging.error(f"Error generating edge audit: {e}")
         await interaction.followup.send("❌ Couldn't generate your edge audit right now. Please try again shortly.")
+
+
+@bot.tree.command(name="viewlogs", description="View your recently logged trades.")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.allowed_installs(guilds=True, users=False)
+async def view_logs(interaction: discord.Interaction):
+    if interaction.guild is not None:
+        await interaction.response.send_message(
+            "❌ This bot can only be used in Direct Messages (DMs)!", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    if not await is_premium_member(interaction.user.id):
+        await interaction.followup.send(build_upgrade_message(), ephemeral=True)
+        return
+
+    trades = await db.fetchall(
+        "SELECT message_id, status, result, direction, entry, stop_loss, take_profit, "
+        "matches_strategy, note, session, risk_reward, timestamp "
+        "FROM trades WHERE user_id = ? ORDER BY id DESC LIMIT 10",
+        (interaction.user.id,)
+    )
+
+    if not trades:
+        await interaction.followup.send("⚠️ You haven't logged any trades yet. Send a chart image to log one!", ephemeral=True)
+        return
+
+    embed = discord.Embed(title="📜 Your Recent Trades", color=discord.Color.blue())
+    avatar_url = interaction.user.display_avatar.url if getattr(interaction.user, "display_avatar", None) else None
+    embed.set_author(name=interaction.user.display_name, icon_url=avatar_url)
+
+    for idx, (msg_id, status, result, direction, entry, sl, tp, matches, note, session, rr, ts) in enumerate(trades, 1):
+        res_icon = "🟢 WIN" if result == "WIN" else ("🔴 LOSS" if result == "LOSS" else "⏳ PENDING")
+        rr_text = f"1:{rr}" if rr is not None else "—"
+        details = f"**{direction or 'Unclear'}** | Entry: {entry or '-'} | SL: {sl or '-'} | TP: {tp or '-'}\nR:R: {rr_text} | Session: {session or '-'} | Status: {res_icon}"
+        if note:
+            details += f"\nNote: {_truncate(note, 80)}"
+        embed.add_field(name=f"Trade #{idx}", value=details, inline=False)
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.error
