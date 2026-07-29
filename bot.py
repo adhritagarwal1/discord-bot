@@ -36,7 +36,6 @@ GEMINI_MODEL = "gemini-3.6-flash"
 CHART_COOLDOWN_SECONDS = 15
 _last_chart_analysis_at = {}  # user_id -> unix timestamp
 
-# Skip anything above this to protect RAM on constrained hosts (e.g. Render free tier)
 MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB
 
 MIN_TRADES_FOR_EDGE = 3
@@ -164,18 +163,19 @@ def parse_trade_json(raw_text: str) -> dict:
 
 def format_trade_summary(user_id: int, t: dict) -> str:
     if t["matches_strategy"] is True:
-        match_icon = "✅"
+        match_icon = "🟢 **Rules Followed**"
     elif t["matches_strategy"] is False:
-        match_icon = "❌"
+        match_icon = "🔴 **Rules Violated**"
     else:
-        match_icon = "❔"
+        match_icon = "⚪ **Unclear**"
 
     return (
-        f"📊 **Trade logged for <@{user_id}>**\n"
-        f"**Direction:** {t['direction']}  |  **Entry:** {t['entry']}\n"
-        f"**SL:** {t['stop_loss']}  |  **TP:** {t['take_profit']}\n"
-        f"**Matches strategy:** {match_icon}  {t['note']}\n\n"
-        f"React 🟢 for WIN or 🔴 for LOSS to log the result."
+        f"### 📊 Trade Logged — <@{user_id}>\n"
+        f"> **Direction:** `{t['direction']}`\n"
+        f"> **Entry:** `{t['entry']}` | **SL:** `{t['stop_loss']}` | **TP:** `{t['take_profit']}`\n"
+        f"> **Strategy Check:** {match_icon}\n"
+        f"> *Note:* {t['note'] or 'None'}\n\n"
+        f"📌 *React below to log outcome:* 🟢 **WIN** | 🔴 **LOSS**"
     )
 
 
@@ -224,7 +224,7 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    processing_msg = await message.channel.send("🔍 **Reading chart...**")
+    processing_msg = await message.channel.send("🔍 **Analyzing chart structure...**")
 
     try:
         image_bytes = await attachment.read()
@@ -322,8 +322,9 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             channel = bot.get_channel(payload.channel_id)
             if channel:
                 status_note = "Logged" if status == "PENDING" else "Updated"
+                badge = "🟢 **WIN**" if result_type == "WIN" else "🔴 **LOSS**"
                 await channel.send(
-                    f"✅ **Trade {status_note}:** Recorded as **{result_type}** for <@{user_id}>!",
+                    f"✅ **Trade {status_note}:** Recorded as {badge} for <@{user_id}>!",
                     delete_after=6
                 )
 
@@ -394,9 +395,10 @@ async def find_my_edge(interaction: discord.Interaction):
 
     lines = []
     for idx, (result, direction, entry, sl, tp, note) in enumerate(reversed(trades), 1):
+        res_icon = "🟢" if result == "WIN" else "🔴"
         lines.append(
-            f"#{idx} [{result}] {direction or 'Unclear'} | Entry {entry or '-'} | "
-            f"SL {sl or '-'} | TP {tp or '-'} | {note or ''}"
+            f"`#{idx}` {res_icon} **{direction or 'Unclear'}** | Entry: `{entry or '-'}` | "
+            f"SL: `{sl or '-'}` | TP: `{tp or '-'}` | *{note or ''}*"
         )
     trade_block = "\n".join(lines)
 
@@ -419,8 +421,10 @@ async def find_my_edge(interaction: discord.Interaction):
         )
         audit_result = response.text or "No analysis returned."
         header = (
-            f"🧠 **Trading Edge Audit for <@{interaction.user.id}>**\n"
-            f"*Last {len(trades)} completed trades — Win rate {win_rate}%*\n\n"
+            f"### 🧠 Trading Edge Audit — <@{interaction.user.id}>\n"
+            f"> **Sample Size:** Last {len(trades)} completed trades\n"
+            f"> **Win Rate:** `{win_rate}%` (`{wins}W` / `{losses}L`)\n\n"
+            f"---\n\n"
         )
         full_response = header + audit_result
         if len(full_response) > 2000:
