@@ -276,8 +276,16 @@ def build_upgrade_message() -> discord.Embed:
 
 
 # -------------------------------------------------------------------
-# HELPERS -- SESSION TAGGING, RISK:REWARD & TILT WARNINGS
+# HELPERS -- PROGRESS BARS, SESSION TAGGING, RISK:REWARD & TILT WARNINGS
 # -------------------------------------------------------------------
+def generate_progress_bar(wins: int, total: int, length: int = 10) -> str:
+    if total <= 0:
+        return "⬜" * length
+    win_count = max(0, min(length, round((wins / total) * length)))
+    loss_count = length - win_count
+    return "🟩" * win_count + "🟥" * loss_count
+
+
 def get_trading_session(dt_utc: datetime) -> str:
     hour = dt_utc.hour
     sessions = []
@@ -598,9 +606,10 @@ def build_edge_embed(user, stats: dict, sections: dict, trades_count: int) -> di
     avatar_url = user.display_avatar.url if getattr(user, "display_avatar", None) else None
     embed.set_author(name=getattr(user, "display_name", str(user)), icon_url=avatar_url)
 
+    progress_bar = generate_progress_bar(stats['wins'], stats['total'])
     embed.add_field(
         name="📊 Win Rate", 
-        value=f"`{stats['win_rate']}%`\n*({stats['wins']}W / {stats['losses']}L)*", 
+        value=f"`{stats['win_rate']}%`\n{progress_bar}\n*({stats['wins']}W / {stats['losses']}L)*", 
         inline=True
     )
     if stats["avg_rr_win"] is not None:
@@ -614,6 +623,139 @@ def build_edge_embed(user, stats: dict, sections: dict, trades_count: int) -> di
 
     embed.set_footer(text=f"Based on your last {trades_count} completed trades")
     return embed
+
+
+# -------------------------------------------------------------------
+# DISCORD UI COMPONENTS -- MODALS, PAGINATION & DROPDOWNS
+# -------------------------------------------------------------------
+class StrategyModal(discord.ui.Modal, title="Set Custom Trading Strategy"):
+    strategy_input = discord.ui.TextInput(
+        label="Trading Rules & Parameters",
+        style=discord.TextStyle.paragraph,
+        placeholder="Describe your strategy, entry triggers, indicators, and risk parameters...",
+        required=True,
+        max_length=MAX_STRATEGY_LENGTH,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        strategy = self.strategy_input.value.strip()
+
+        await db.execute(
+            "INSERT INTO strategies (user_id, prompt) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET prompt = excluded.prompt",
+            (interaction.user.id, strategy),
+        )
+
+        embed = discord.Embed(
+            title="✅ Strategy Successfully Updated", 
+            description=f"> {strategy}", 
+            color=discord.Color.brand_green()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+class TradeLogFilterSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="All Results", value="ALL", emoji="🌐", default=True),
+            discord.SelectOption(label="Wins Only", value="WIN", emoji="🟢"),
+            discord.SelectOption(label="Losses Only", value="LOSS", emoji="🔴"),
+            discord.SelectOption(label="Breakeven Only", value="BREAKEVEN", emoji="⚪"),
+        ]
+        super().__init__(placeholder="Filter logs by trade outcome...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        view: TradeLogPaginator = self.view
+        view.selected_filter = self.values[0]
+        
+        for option in self.options:
+            option.default = (option.value == view.selected_filter)
+            
+        view.apply_filter()
+        view.current_page = 0
+        await view.update_message(interaction)
+
+
+class TradeLogPaginator(discord.ui.View):
+    def __init__(self, user, all_trades: list, page_size: int = 3):
+        super().__init__(timeout=180)
+        self.user = user
+        self.all_trades = all_trades
+        self.page_size = page_size
+        self.selected_filter = "ALL"
+        self.filtered_trades = list(all_trades)
+        self.current_page = 0
+
+        self.add_item(TradeLogFilterSelect())
+
+    def apply_filter(self):
+        if self.selected_filter == "ALL":
+            self.filtered_trades = list(self.all_trades)
+        else:
+            self.filtered_trades = [t for t in self.all_trades if t[0] == self.selected_filter]
+
+    @property
+    def max_pages(self) -> int:
+        return max(1, (len(self.filtered_trades) + self.page_size - 1) // self.page_size)
+
+    def build_embed(self) -> discord.Embed:
+        if not self.filtered_trades:
+            embed = discord.Embed(
+                title="📜 Trade Log History",
+                description=f"No trades logged matching filter **{self.selected_filter}**.",
+                color=discord.Color.orange()
+            )
+            avatar_url = self.user.display_avatar.url if getattr(self.user, "display_avatar", None) else None
+            embed.set_author(name=getattr(self.user, "display_name", str(self.user)), icon_url=avatar_url)
+            return embed
+
+        start_idx = self.current_page * self.page_size
+        end_idx = start_idx + self.page_size
+        page_items = self.filtered_trades[start_idx:end_idx]
+
+        embed = discord.Embed(
+            title="📜 Trade Log History",
+            color=discord.Color.blurple()
+        )
+        avatar_url = self.user.display_avatar.url if getattr(self.user, "display_avatar", None) else None
+        embed.set_author(name=getattr(self.user, "display_name", str(self.user)), icon_url=avatar_url)
+
+        for idx, t in enumerate(page_items, start=start_idx + 1):
+            res, dir_, entry, sl, tp, note, sess, rr, status = t
+            res_display = res if res else status
+            rr_text = f"1:{rr}" if rr is not None else "-"
+            value = (
+                f"> **Direction:** `{dir_ or '?'}` | **Result:** `{res_display}`\n"
+                f"> **Entry:** `{entry or '-'}` | **SL:** `{sl or '-'}` | **TP:** `{tp or '-'}`\n"
+                f"> **R:R:** `{rr_text}` | **Session:** `{sess or '-'}`\n"
+                f"> **Note:** {note or '-'}"
+            )
+            embed.add_field(name=f"🔖 Trade #{idx}", value=value, inline=False)
+
+        embed.set_footer(text=f"Page {self.current_page + 1} of {self.max_pages} • Total Logged: {len(self.filtered_trades)}")
+        return embed
+
+    def update_button_states(self):
+        self.prev_button.disabled = (self.current_page == 0)
+        self.next_button.disabled = (self.current_page >= self.max_pages - 1)
+
+    async def update_message(self, interaction: discord.Interaction):
+        self.update_button_states()
+        embed = self.build_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.primary, emoji="◀️")
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            await self.update_message(interaction)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, emoji="▶️")
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page < self.max_pages - 1:
+            self.current_page += 1
+            await self.update_message(interaction)
 
 
 # -------------------------------------------------------------------
@@ -869,37 +1011,23 @@ async def set_timezone(interaction: discord.Interaction, timezone_str: str):
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="setstrategy", description="Set your custom trading strategy for chart analysis.")
-@app_commands.describe(strategy="Describe your trading rules, indicators, entry triggers, and risk model.")
+@bot.tree.command(name="setstrategy", description="Set your custom trading strategy via interactive modal pop-up.")
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.allowed_installs(guilds=True, users=False)
-async def set_strategy(interaction: discord.Interaction, strategy: str):
-    await interaction.response.defer(ephemeral=True)
-
+async def set_strategy(interaction: discord.Interaction):
     if not await is_premium_member(interaction.user.id):
-        await interaction.followup.send(embed=build_upgrade_message(), ephemeral=True)
+        await interaction.response.send_message(embed=build_upgrade_message(), ephemeral=True)
         return
 
-    if len(strategy) > MAX_STRATEGY_LENGTH:
-        err_embed = discord.Embed(
-            description=f"⚠️ **Too Long:** Your strategy is `{len(strategy)}` characters. Please keep it under `{MAX_STRATEGY_LENGTH}` to prevent bloat during chart analysis.",
-            color=discord.Color.red()
-        )
-        await interaction.followup.send(embed=err_embed, ephemeral=True)
-        return
-
-    await db.execute(
-        "INSERT INTO strategies (user_id, prompt) VALUES (?, ?) "
-        "ON CONFLICT(user_id) DO UPDATE SET prompt = excluded.prompt",
-        (interaction.user.id, strategy),
+    strategy_row = await db.fetchone(
+        "SELECT prompt FROM strategies WHERE user_id = ?", (interaction.user.id,)
     )
+    
+    modal = StrategyModal()
+    if strategy_row and strategy_row[0]:
+        modal.strategy_input.default = strategy_row[0]
 
-    embed = discord.Embed(
-        title="✅ Strategy Successfully Updated", 
-        description=f"> {strategy}", 
-        color=discord.Color.brand_green()
-    )
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    await interaction.response.send_modal(modal)
 
 
 @bot.tree.command(name="findmyedge", description="Find patterns in your last 10 logged trades.")
@@ -998,9 +1126,11 @@ async def stats_command(interaction: discord.Interaction):
         return
 
     st = compute_stats(trades)
+    progress_bar = generate_progress_bar(st["wins"], st["total"])
+
     embed = discord.Embed(title="📊 Your Trading Statistics", color=discord.Color.blue())
     embed.add_field(name="📝 Total Completed", value=f"`{st['total']}`", inline=True)
-    embed.add_field(name="🏆 Win Rate", value=f"`{st['win_rate']}%`", inline=True)
+    embed.add_field(name="🏆 Win Rate", value=f"`{st['win_rate']}%`\n{progress_bar}", inline=True)
     embed.add_field(name="⚖️ Record", value=f"`{st['wins']}W / {st['losses']}L`", inline=True)
     
     if st["avg_rr_win"] is not None:
@@ -1011,22 +1141,20 @@ async def stats_command(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="viewlogs", description="View your recent logged trades.")
-@app_commands.describe(limit="Number of recent trades to view (default 5, max 10)")
+@bot.tree.command(name="viewlogs", description="View and filter your logged trades with pagination.")
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.allowed_installs(guilds=True, users=False)
-async def viewlogs_command(interaction: discord.Interaction, limit: int = 5):
+async def viewlogs_command(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     if not await is_premium_member(interaction.user.id):
         await interaction.followup.send(embed=build_upgrade_message(), ephemeral=True)
         return
 
-    limit = max(1, min(limit, 10))
     trades = await db.fetchall(
         "SELECT result, direction, entry, stop_loss, take_profit, note, session, risk_reward, status "
-        "FROM trades WHERE user_id = ? ORDER BY id DESC LIMIT ?",
-        (interaction.user.id, limit),
+        "FROM trades WHERE user_id = ? ORDER BY id DESC",
+        (interaction.user.id,),
     )
 
     if not trades:
@@ -1034,23 +1162,12 @@ async def viewlogs_command(interaction: discord.Interaction, limit: int = 5):
         await interaction.followup.send(embed=err_embed, ephemeral=True)
         return
 
-    # Display recent trades in chronological order (oldest to newest)
     chronological_trades = list(reversed(trades))
+    paginator = TradeLogPaginator(interaction.user, chronological_trades, page_size=3)
+    paginator.update_button_states()
+    embed = paginator.build_embed()
 
-    embed = discord.Embed(title=f"📜 Your Last {len(chronological_trades)} Trades", color=discord.Color.blurple())
-    for idx, t in enumerate(chronological_trades, 1):
-        res, dir_, entry, sl, tp, note, sess, rr, status = t
-        res_display = res if res else status
-        rr_text = f"1:{rr}" if rr is not None else "-"
-        value = (
-            f"> **Direction:** `{dir_ or '?'}` | **Result:** `{res_display}`\n"
-            f"> **Entry:** `{entry or '-'}` | **SL:** `{sl or '-'}` | **TP:** `{tp or '-'}`\n"
-            f"> **R:R:** `{rr_text}` | **Session:** `{sess or '-'}`\n"
-            f"> **Note:** {note or '-'}"
-        )
-        embed.add_field(name=f"🔖 Trade #{idx}", value=value, inline=False)
-
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, view=paginator, ephemeral=True)
 
 
 @bot.tree.command(name="deletelast", description="Delete your most recently logged trade.")
@@ -1113,7 +1230,7 @@ async def help_command(interaction: discord.Interaction):
     )
     embed.add_field(
         name="`/setstrategy`",
-        value="> Set your custom trading strategy rules and indicators for tailored analysis.",
+        value="> Set your custom trading strategy rules via an interactive modal dialog box.",
         inline=False
     )
     embed.add_field(
@@ -1123,12 +1240,12 @@ async def help_command(interaction: discord.Interaction):
     )
     embed.add_field(
         name="`/stats`",
-        value="> View your overall win rate, total completed trades, and average risk-to-reward metrics.",
+        value="> View your overall win rate (with visual win bars), total completed trades, and average risk-to-reward metrics.",
         inline=False
     )
     embed.add_field(
         name="`/viewlogs`",
-        value="> Review your recent trade history and visually logged details.",
+        value="> Paginate and filter your recent trade history by outcome (Wins, Losses, Breakeven).",
         inline=False
     )
     embed.add_field(
