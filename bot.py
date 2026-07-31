@@ -106,6 +106,12 @@ CREATE TABLE IF NOT EXISTS strategies (
     prompt TEXT NOT NULL
 )
 """
+SQLITE_USERS_TABLE = """
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    chart_timezone TEXT DEFAULT 'UTC'
+)
+"""
 SQLITE_TRADES_TABLE = """
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,6 +135,12 @@ PG_STRATEGIES_TABLE = """
 CREATE TABLE IF NOT EXISTS strategies (
     user_id BIGINT PRIMARY KEY,
     prompt TEXT NOT NULL
+)
+"""
+PG_USERS_TABLE = """
+CREATE TABLE IF NOT EXISTS users (
+    user_id BIGINT PRIMARY KEY,
+    chart_timezone TEXT DEFAULT 'UTC'
 )
 """
 PG_TRADES_TABLE = """
@@ -155,6 +167,7 @@ class Database:
     def __init__(self):
         self.use_postgres = bool(DATABASE_URL)
         self.pool = None
+        self.sqlite_conn = None
         if not self.use_postgres:
             logging.warning(
                 "DATABASE_URL not set -- using local SQLite (%s). On Render this file "
@@ -168,17 +181,19 @@ class Database:
             self.pool = await asyncpg.create_pool(DATABASE_URL, ssl="require")
             async with self.pool.acquire() as conn:
                 await conn.execute(PG_STRATEGIES_TABLE)
+                await conn.execute(PG_USERS_TABLE)
                 await conn.execute(PG_TRADES_TABLE)
         else:
-            async with aiosqlite.connect(SQLITE_DB_PATH) as conn:
-                await conn.execute(SQLITE_STRATEGIES_TABLE)
-                await conn.execute(SQLITE_TRADES_TABLE)
-                for col, coltype in (("session", "TEXT"), ("risk_reward", "REAL")):
-                    try:
-                        await conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {coltype}")
-                    except Exception:
-                        pass
-                await conn.commit()
+            self.sqlite_conn = await aiosqlite.connect(SQLITE_DB_PATH)
+            await self.sqlite_conn.execute(SQLITE_STRATEGIES_TABLE)
+            await self.sqlite_conn.execute(SQLITE_USERS_TABLE)
+            await self.sqlite_conn.execute(SQLITE_TRADES_TABLE)
+            for col, coltype in (("session", "TEXT"), ("risk_reward", "REAL")):
+                try:
+                    await self.sqlite_conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {coltype}")
+                except Exception:
+                    pass
+            await self.sqlite_conn.commit()
         logging.info(f"Database ready ({'Postgres' if self.use_postgres else 'SQLite'}).")
 
     @staticmethod
@@ -196,9 +211,8 @@ class Database:
             async with self.pool.acquire() as conn:
                 await conn.execute(self._to_pg(query), *params)
         else:
-            async with aiosqlite.connect(SQLITE_DB_PATH) as conn:
-                await conn.execute(query, params)
-                await conn.commit()
+            await self.sqlite_conn.execute(query, params)
+            await self.sqlite_conn.commit()
 
     async def fetchone(self, query: str, params: tuple = ()):
         if self.use_postgres:
@@ -206,9 +220,8 @@ class Database:
                 row = await conn.fetchrow(self._to_pg(query), *params)
                 return tuple(row) if row else None
         else:
-            async with aiosqlite.connect(SQLITE_DB_PATH) as conn:
-                async with conn.execute(query, params) as cursor:
-                    return await cursor.fetchone()
+            async with self.sqlite_conn.execute(query, params) as cursor:
+                return await cursor.fetchone()
 
     async def fetchall(self, query: str, params: tuple = ()):
         if self.use_postgres:
@@ -216,9 +229,8 @@ class Database:
                 rows = await conn.fetch(self._to_pg(query), *params)
                 return [tuple(r) for r in rows]
         else:
-            async with aiosqlite.connect(SQLITE_DB_PATH) as conn:
-                async with conn.execute(query, params) as cursor:
-                    return await cursor.fetchall()
+            async with self.sqlite_conn.execute(query, params) as cursor:
+                return await cursor.fetchall()
 
 
 db = Database()
@@ -260,7 +272,7 @@ def build_upgrade_message() -> str:
 # -------------------------------------------------------------------
 # HELPERS -- SESSION TAGGING, RISK:REWARD & TILT WARNINGS
 # -------------------------------------------------------------------
-def get_trading_session(dt_utc) -> str:
+def get_trading_session(dt_utc: datetime) -> str:
     hour = dt_utc.hour
     sessions = []
     if 0 <= hour < 9:
@@ -300,20 +312,23 @@ def compute_risk_reward(direction: str, entry, stop_loss, take_profit) -> float 
 
 
 def check_user_tilt_status(user_trades: list) -> dict:
-    today = datetime.utcnow().date()
+    now_utc = datetime.now(timezone.utc)
+    today = now_utc.date()
     
     todays_trades = []
     for t in user_trades:
         raw_ts = t[8] if len(t) > 8 else None
         if isinstance(raw_ts, datetime):
-            ts = raw_ts
+            ts = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=timezone.utc)
         elif isinstance(raw_ts, str):
             try:
                 ts = datetime.fromisoformat(raw_ts.replace(" ", "T"))
+                if not ts.tzinfo:
+                    ts = ts.replace(tzinfo=timezone.utc)
             except ValueError:
-                ts = datetime.utcnow()
+                ts = now_utc
         else:
-            ts = datetime.utcnow()
+            ts = now_utc
 
         if ts.date() == today:
             r_multiple = 0.0
@@ -337,7 +352,7 @@ def check_user_tilt_status(user_trades: list) -> dict:
         else:
             break
             
-    thirty_mins_ago = datetime.utcnow() - timedelta(minutes=30)
+    thirty_mins_ago = now_utc - timedelta(minutes=30)
     recent_trade_count = sum(1 for t in todays_trades if t['timestamp'] >= thirty_mins_ago)
     
     return {
@@ -400,17 +415,27 @@ async def call_gemini(contents, config=None):
     raise last_err
 
 
-def build_chart_prompt(user_strategy: str) -> str:
+def build_chart_prompt(user_strategy: str, user_timezone: str = "UTC") -> str:
     return (
         "You are a trade-logging assistant. You are NOT a signal provider and must NEVER "
         "recommend a future trade. This screenshot shows a trade the user has already taken "
         "or planned -- only describe what is already visible on the chart.\n\n"
-        f"User's strategy rules: {user_strategy}\n\n"
+        f"User's strategy rules: {user_strategy}\n"
+        f"User's chart x-axis timezone: {user_timezone}\n\n"
+        "CRITICAL TIMEZONE & SESSION INSTRUCTION:\n"
+        f"1. Read the time visible on the chart's time axis (x-axis). The chart uses timezone: {user_timezone}.\n"
+        "2. Convert that chart time to UTC.\n"
+        "3. Identify the trading session based on the converted UTC time:\n"
+        "   - Asia: 00:00 - 09:00 UTC\n"
+        "   - London: 07:00 - 16:00 UTC\n"
+        "   - New York: 12:00 - 21:00 UTC\n"
+        "   If overlapping, combine them with a slash (e.g. 'London/New York'). If off-hours, use 'Off-hours'. If time is unreadable, use 'Unclear'.\n\n"
         "Return ONLY valid JSON with exactly these keys, no other text:\n"
         '{"direction": "Long" | "Short" | "Unclear", '
         '"entry": "<price as text, or Unclear>", '
         '"stop_loss": "<price as text, or Unclear>", '
         '"take_profit": "<price as text, or Unclear>", '
+        '"session": "<Asia | London | New York | London/New York | Off-hours | Unclear>", '
         '"matches_strategy": true | false, '
         '"note": "<10 words max on whether it matches the strategy>"}'
     )
@@ -422,6 +447,7 @@ def parse_trade_json(raw_text: str) -> dict:
         "entry": "Unclear",
         "stop_loss": "Unclear",
         "take_profit": "Unclear",
+        "session": "Unclear",
         "matches_strategy": None,
         "note": "Could not read this chart.",
     }
@@ -440,6 +466,7 @@ def parse_trade_json(raw_text: str) -> dict:
             "entry": data.get("entry") or "Unclear",
             "stop_loss": data.get("stop_loss") or "Unclear",
             "take_profit": data.get("take_profit") or "Unclear",
+            "session": data.get("session") or "Unclear",
             "matches_strategy": bool(matches) if matches is not None else None,
             "note": str(data.get("note") or "")[:150],
         }
@@ -678,6 +705,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
+    global _last_chart_analysis_at
     if message.author.bot:
         return
 
@@ -696,6 +724,10 @@ async def on_message(message: discord.Message):
         return
 
     now = time.time()
+    # Prune old timestamps periodically to prevent memory leaks
+    if len(_last_chart_analysis_at) > 500:
+        _last_chart_analysis_at = {uid: ts for uid, ts in _last_chart_analysis_at.items() if now - ts < 3600}
+
     last_call = _last_chart_analysis_at.get(message.author.id, 0)
     if now - last_call < CHART_COOLDOWN_SECONDS:
         await bot.process_commands(message)
@@ -724,8 +756,13 @@ async def on_message(message: discord.Message):
             "and take-profit levels visible on the chart."
         )
 
+        user_tz_row = await db.fetchone(
+            "SELECT chart_timezone FROM users WHERE user_id = ?", (message.author.id,)
+        )
+        user_timezone = user_tz_row[0] if user_tz_row and user_tz_row[0] else "UTC"
+
         with Image.open(io.BytesIO(image_bytes)) as img:
-            full_prompt = build_chart_prompt(user_strategy)
+            full_prompt = build_chart_prompt(user_strategy, user_timezone)
             response = await call_gemini(
                 [img, full_prompt],
                 config=types.GenerateContentConfig(response_mime_type="application/json"),
@@ -734,7 +771,10 @@ async def on_message(message: discord.Message):
         trade_data = parse_trade_json(response.text)
         del image_bytes
 
-        session = get_trading_session(message.created_at.astimezone(timezone.utc))
+        session = trade_data.get("session", "Unclear")
+        if session == "Unclear" or not session:
+            session = get_trading_session(message.created_at.astimezone(timezone.utc))
+
         risk_reward = compute_risk_reward(
             trade_data["direction"], trade_data["entry"], trade_data["stop_loss"], trade_data["take_profit"]
         )
@@ -776,6 +816,33 @@ async def on_message(message: discord.Message):
 # -------------------------------------------------------------------
 # SLASH COMMANDS
 # -------------------------------------------------------------------
+@bot.tree.command(name="settimezone", description="Set your TradingView chart timezone for accurate session detection.")
+@app_commands.describe(timezone_str="Your chart timezone setting (e.g. UTC, UTC+5:30, EST, PST, IST)")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.allowed_installs(guilds=True, users=False)
+async def set_timezone(interaction: discord.Interaction, timezone_str: str):
+    await interaction.response.defer(ephemeral=True)
+
+    if not await is_premium_member(interaction.user.id):
+        await interaction.followup.send(build_upgrade_message(), ephemeral=True)
+        return
+
+    clean_tz = timezone_str.strip().upper()
+
+    await db.execute(
+        "INSERT INTO users (user_id, chart_timezone) VALUES (?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET chart_timezone = excluded.chart_timezone",
+        (interaction.user.id, clean_tz),
+    )
+
+    embed = discord.Embed(
+        title="✅ Timezone Updated",
+        description=f"Your chart timezone is now set to **{clean_tz}**. AI chart analysis will convert x-axis timestamps using this setting.",
+        color=discord.Color.green(),
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="setstrategy", description="Set your custom trading strategy for chart analysis.")
 @app_commands.describe(strategy="Describe your trading rules, indicators, entry triggers, and risk model.")
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -932,8 +999,11 @@ async def viewlogs_command(interaction: discord.Interaction, limit: int = 5):
         await interaction.followup.send("⚠️ You haven't logged any trades yet.", ephemeral=True)
         return
 
-    embed = discord.Embed(title=f"📜 Your Last {len(trades)} Trades", color=discord.Color.blurple())
-    for idx, t in enumerate(trades, 1):
+    # Display recent trades in chronological order (oldest to newest)
+    chronological_trades = list(reversed(trades))
+
+    embed = discord.Embed(title=f"📜 Your Last {len(chronological_trades)} Trades", color=discord.Color.blurple())
+    for idx, t in enumerate(chronological_trades, 1):
         res, dir_, entry, sl, tp, note, sess, rr, status = t
         res_display = res if res else status
         rr_text = f"1:{rr}" if rr is not None else "-"
@@ -970,7 +1040,18 @@ async def deletelast_command(interaction: discord.Interaction):
     trade_id, message_id = last_trade
     await db.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
 
-    await interaction.followup.send(f"🗑️ Successfully deleted your most recent trade entry (ID: {trade_id}).", ephemeral=True)
+    deleted_msg_note = ""
+    try:
+        msg = await interaction.channel.fetch_message(message_id)
+        await msg.delete()
+        deleted_msg_note = " and deleted its message"
+    except Exception:
+        pass
+
+    await interaction.followup.send(
+        f"🗑️ Successfully deleted your most recent trade entry (ID: {trade_id}){deleted_msg_note}.",
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name="help", description="Show information about TradeSight AI commands and features.")
@@ -985,6 +1066,11 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="📷 Automatic Chart Logging",
         value="Drop any chart screenshot in chat or DM to instantly log direction, entry, stop loss, take profit, and strategy matching.",
+        inline=False
+    )
+    embed.add_field(
+        name="/settimezone",
+        value="Set your chart timezone (e.g., UTC, UTC+5:30, EST, IST) for accurate session detection.",
         inline=False
     )
     embed.add_field(
