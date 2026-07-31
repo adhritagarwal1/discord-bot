@@ -432,8 +432,7 @@ async def call_gemini(contents, config=None):
 
 def build_chart_prompt(user_strategy: str, user_timezone: str = "UTC") -> str:
     return (
-        "You are an ultra-strict, ruthless prop firm risk auditor. Your ONLY job is to rigidly enforce the user's trading strategy. "
-        "You must DISQUALIFY the setup if even ONE rule is bent, missing, or unclear. Do NOT be lenient. Do NOT assume anything that isn't clearly visible.\n\n"
+        "You are a strict, objective trading strategy auditor. Your job is to strictly enforce the user's strategy rules based ONLY on what can be visually audited on a single chart screenshot.\n\n"
         f"User's strategy rules: {user_strategy}\n"
         f"User's chart x-axis timezone: {user_timezone}\n\n"
         "CRITICAL TIMEZONE & SESSION INSTRUCTION:\n"
@@ -445,9 +444,9 @@ def build_chart_prompt(user_strategy: str, user_timezone: str = "UTC") -> str:
         "   - New York: 12:00 - 21:00 UTC\n"
         "   If overlapping, combine them with a slash (e.g. 'London/New York'). If off-hours, use 'Off-hours'. If time is unreadable, use 'Unclear'.\n\n"
         "STRATEGY AUDIT INSTRUCTIONS:\n"
-        "- Evaluate the visible chart against EVERY single rule in the user's strategy.\n"
-        "- If ANY rule is violated, or if you cannot visually confirm a rule is met, 'matches_strategy' MUST be false.\n"
-        "- No assumptions, no hindsight bias, no 'close enough'.\n\n"
+        "- Focus strictly on auditing VISIBLE execution rules (entry model, trigger, stop loss/take profit levels, market structure, timing/session).\n"
+        "- HTF EXCEPTION: A single chart screenshot only shows lower timeframe execution. Do NOT fail or disqualify a trade for unobservable Higher Timeframe (HTF) bias, daily context, or macro trend. Assume HTF bias is aligned unless the visible chart directly contradicts it.\n"
+        "- Disqualify (matches_strategy = false) ONLY if a visible execution rule on the chart is broken or missing (e.g., wrong session, missing FVG/sweep, bad R:R, invalid trigger).\n\n"
         "Return ONLY valid JSON with exactly these keys, no other text:\n"
         '{"direction": "Long" | "Short" | "Unclear", '
         '"entry": "<price as text, or Unclear>", '
@@ -455,7 +454,7 @@ def build_chart_prompt(user_strategy: str, user_timezone: str = "UTC") -> str:
         '"take_profit": "<price as text, or Unclear>", '
         '"session": "<Asia | London | New York | London/New York | Off-hours | Unclear>", '
         '"matches_strategy": true | false, '
-        '"note": "<Max 15 words. If false, aggressively state EXACTLY which rule failed. If true, describe the entry trigger/rationale directly (e.g., \'Valid entry at 15m FVG after liquidity sweep\').>"}'
+        '"note": "<Max 15 words. If false, state EXACTLY which visible execution rule failed. If true, describe the entry trigger/rationale directly (e.g., \'Valid entry at 15m FVG after liquidity sweep\').>"}'
     )
 
 def parse_trade_json(raw_text: str) -> dict:
