@@ -432,9 +432,8 @@ async def call_gemini(contents, config=None):
 
 def build_chart_prompt(user_strategy: str, user_timezone: str = "UTC") -> str:
     return (
-        "You are a trade-logging assistant. You are NOT a signal provider and must NEVER "
-        "recommend a future trade. This screenshot shows a trade the user has already taken "
-        "or planned -- only describe what is already visible on the chart.\n\n"
+        "You are an ultra-strict, ruthless prop firm risk auditor. Your ONLY job is to rigidly enforce the user's trading strategy. "
+        "You must DISQUALIFY the setup if even ONE rule is bent, missing, or unclear. Do NOT be lenient. Do NOT assume anything that isn't clearly visible.\n\n"
         f"User's strategy rules: {user_strategy}\n"
         f"User's chart x-axis timezone: {user_timezone}\n\n"
         "CRITICAL TIMEZONE & SESSION INSTRUCTION:\n"
@@ -445,6 +444,10 @@ def build_chart_prompt(user_strategy: str, user_timezone: str = "UTC") -> str:
         "   - London: 07:00 - 16:00 UTC\n"
         "   - New York: 12:00 - 21:00 UTC\n"
         "   If overlapping, combine them with a slash (e.g. 'London/New York'). If off-hours, use 'Off-hours'. If time is unreadable, use 'Unclear'.\n\n"
+        "STRATEGY AUDIT INSTRUCTIONS:\n"
+        "- Evaluate the visible chart against EVERY single rule in the user's strategy.\n"
+        "- If ANY rule is violated, or if you cannot visually confirm a rule is met, 'matches_strategy' MUST be false.\n"
+        "- No assumptions, no hindsight bias, no 'close enough'.\n\n"
         "Return ONLY valid JSON with exactly these keys, no other text:\n"
         '{"direction": "Long" | "Short" | "Unclear", '
         '"entry": "<price as text, or Unclear>", '
@@ -452,9 +455,8 @@ def build_chart_prompt(user_strategy: str, user_timezone: str = "UTC") -> str:
         '"take_profit": "<price as text, or Unclear>", '
         '"session": "<Asia | London | New York | London/New York | Off-hours | Unclear>", '
         '"matches_strategy": true | false, '
-        '"note": "<10 words max on whether it matches the strategy>"}'
+        '"note": "<Max 15 words. If false, aggressively state EXACTLY which rule failed. If true, describe the entry trigger/rationale directly (e.g., \'Valid entry at 15m FVG after liquidity sweep\').>"}'
     )
-
 
 def parse_trade_json(raw_text: str) -> dict:
     fallback = {
