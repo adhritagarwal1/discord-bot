@@ -264,9 +264,15 @@ async def is_premium_member(user_id: int) -> bool:
     return result
 
 
-def build_upgrade_message() -> str:
-    base = "🔒 **This is a premium feature.** Subscribe to unlock TradeSight AI"
-    return f"{base}: {WHOP_CHECKOUT_URL}" if WHOP_CHECKOUT_URL else f"{base}."
+def build_upgrade_message() -> discord.Embed:
+    embed = discord.Embed(
+        title="🔒 Premium Feature",
+        description="Subscribe to **TradeSight AI** to unlock full chart analysis, automated journaling, and edge audits.",
+        color=discord.Color.dark_theme()
+    )
+    if WHOP_CHECKOUT_URL:
+        embed.add_field(name="Ready to Upgrade?", value=f"[Click here to get your Access Pass]({WHOP_CHECKOUT_URL})")
+    return embed
 
 
 # -------------------------------------------------------------------
@@ -370,11 +376,11 @@ def generate_tilt_warning_embed(user_mention: str, tilt_data: dict) -> discord.E
     
     triggers = []
     if consecutive_losses >= 3:
-        triggers.append(f"• **{consecutive_losses} Consecutive Losses:** High risk of revenge trading.")
+        triggers.append(f"> 📉 **{consecutive_losses} Consecutive Losses:** High risk of revenge trading.")
     if total_daily_r <= -3.0:
-        triggers.append(f"• **Daily Loss Limit Reached:** Current daily total is `{total_daily_r:+.1f}R`.")
+        triggers.append(f"> 🛑 **Daily Loss Limit Reached:** Current daily total is `{total_daily_r:+.1f}R`.")
     if recent_count >= 3:
-        triggers.append(f"• **Rapid Trade Frequency:** {recent_count} trades logged in the last 30 minutes.")
+        triggers.append(f"> ⚡ **Rapid Trade Frequency:** `{recent_count}` trades logged in the last 30 minutes.")
 
     if not triggers:
         return None
@@ -384,9 +390,10 @@ def generate_tilt_warning_embed(user_mention: str, tilt_data: dict) -> discord.E
         description=(
             f"Hey {user_mention}, your recent trade log triggered risk protection rules:\n\n"
             + "\n".join(triggers)
-            + "\n\n**Recommended Action:** Step away from the charts for 30–60 minutes. Close your trading platform and reassess during the next session."
+            + "\n\n**Recommended Action:**\nStep away from the charts for 30–60 minutes. Close your trading platform and reassess during the next session."
         ),
-        color=discord.Color.red()
+        color=discord.Color.brand_red(),
+        timestamp=datetime.now(timezone.utc)
     )
     embed.set_footer(text="Protect your capital first. Market edge only works with disciplined execution.")
     return embed
@@ -538,24 +545,25 @@ def compute_stats(trades: list) -> dict:
 # -------------------------------------------------------------------
 def build_trade_embed(user, t: dict, session: str, risk_reward, result: str = None) -> discord.Embed:
     if result == "WIN":
-        color = discord.Color.green()
+        color = discord.Color.brand_green()
     elif result == "LOSS":
-        color = discord.Color.red()
+        color = discord.Color.brand_red()
     elif result == "BREAKEVEN":
         color = discord.Color.light_grey()
     else:
         color = discord.Color.blurple()
 
-    embed = discord.Embed(title="📊 Trade Logged", color=color)
+    embed = discord.Embed(title="📊 Trade Log Analysis", color=color, timestamp=datetime.now(timezone.utc))
     avatar_url = user.display_avatar.url if getattr(user, "display_avatar", None) else None
     embed.set_author(name=getattr(user, "display_name", str(user)), icon_url=avatar_url)
 
-    embed.add_field(name="Direction", value=t["direction"], inline=True)
-    embed.add_field(name="Session", value=session or "Unclear", inline=True)
-    embed.add_field(name="R:R", value=f"1:{risk_reward}" if risk_reward else "—", inline=True)
-    embed.add_field(name="Entry", value=t["entry"], inline=True)
-    embed.add_field(name="Stop Loss", value=t["stop_loss"], inline=True)
-    embed.add_field(name="Take Profit", value=t["take_profit"], inline=True)
+    embed.add_field(name="🧭 Direction", value=f"`{t['direction']}`", inline=True)
+    embed.add_field(name="🕒 Session", value=f"`{session or 'Unclear'}`", inline=True)
+    embed.add_field(name="⚖️ R:R", value=f"`1:{risk_reward}`" if risk_reward else "`—`", inline=True)
+    
+    embed.add_field(name="🟢 Entry", value=f"`{t['entry']}`", inline=True)
+    embed.add_field(name="🔴 Stop Loss", value=f"`{t['stop_loss']}`", inline=True)
+    embed.add_field(name="🎯 Take Profit", value=f"`{t['take_profit']}`", inline=True)
 
     if t["matches_strategy"] is True:
         match_icon = "✅"
@@ -563,7 +571,8 @@ def build_trade_embed(user, t: dict, session: str, risk_reward, result: str = No
         match_icon = "❌"
     else:
         match_icon = "❔"
-    embed.add_field(name="Matches Strategy", value=_truncate(f"{match_icon} {t['note']}"), inline=False)
+    
+    embed.add_field(name="📋 Strategy Check", value=f"> {match_icon} **{_truncate(t['note'])}**", inline=False)
 
     if result:
         if result == 'WIN':
@@ -572,29 +581,36 @@ def build_trade_embed(user, t: dict, session: str, risk_reward, result: str = No
             res_emoji = '🔴'
         else:
             res_emoji = '⚪'
-        embed.add_field(name="Result", value=f"{res_emoji} {result}", inline=False)
+        embed.add_field(name="🏁 Final Result", value=f"> {res_emoji} **{result}**", inline=False)
     else:
-        embed.set_footer(text="Tap a button below to log the result")
+        embed.set_footer(text="Tap a button below to log the final result of this trade")
 
     return embed
 
 
 def build_edge_embed(user, stats: dict, sections: dict, trades_count: int) -> discord.Embed:
-    embed = discord.Embed(title="🧠 Trading Edge Audit", color=discord.Color.gold())
+    embed = discord.Embed(
+        title="🧠 Trading Edge Audit", 
+        description="Here is your personalized performance breakdown.", 
+        color=discord.Color.gold(),
+        timestamp=datetime.now(timezone.utc)
+    )
     avatar_url = user.display_avatar.url if getattr(user, "display_avatar", None) else None
     embed.set_author(name=getattr(user, "display_name", str(user)), icon_url=avatar_url)
 
     embed.add_field(
-        name="Win Rate", value=f"{stats['win_rate']}% ({stats['wins']}W / {stats['losses']}L)", inline=True
+        name="📊 Win Rate", 
+        value=f"`{stats['win_rate']}%`\n*({stats['wins']}W / {stats['losses']}L)*", 
+        inline=True
     )
     if stats["avg_rr_win"] is not None:
-        embed.add_field(name="Avg R:R (Wins)", value=f"1:{stats['avg_rr_win']}", inline=True)
+        embed.add_field(name="📈 Avg R:R (Wins)", value=f"`1:{stats['avg_rr_win']}`", inline=True)
     if stats["avg_rr_loss"] is not None:
-        embed.add_field(name="Avg R:R (Losses)", value=f"1:{stats['avg_rr_loss']}", inline=True)
+        embed.add_field(name="📉 Avg R:R (Losses)", value=f"`1:{stats['avg_rr_loss']}`", inline=True)
 
-    embed.add_field(name="🎯 Core Edge", value=_truncate(sections.get("core_edge")), inline=False)
-    embed.add_field(name="🕳️ Primary Leak", value=_truncate(sections.get("primary_leak")), inline=False)
-    embed.add_field(name="🛠️ Action Plan", value=_truncate(sections.get("action_plan")), inline=False)
+    embed.add_field(name="🎯 Core Edge", value=f"> {_truncate(sections.get('core_edge'))}", inline=False)
+    embed.add_field(name="🕳️ Primary Leak", value=f"> {_truncate(sections.get('primary_leak'))}", inline=False)
+    embed.add_field(name="🛠️ Action Plan", value=f"> {_truncate(sections.get('action_plan'))}", inline=False)
 
     embed.set_footer(text=f"Based on your last {trades_count} completed trades")
     return embed
@@ -615,7 +631,7 @@ class TradeResultView(discord.ui.View):
         )
         if not trade:
             await interaction.response.send_message(
-                "⚠️ I couldn't find this trade in the database.", ephemeral=True
+                "⚠️ **Error:** I couldn't find this trade in the database.", ephemeral=True
             )
             return
 
@@ -624,12 +640,12 @@ class TradeResultView(discord.ui.View):
 
         if interaction.user.id != user_id:
             await interaction.response.send_message(
-                "Only the trader who posted this chart can log its result.", ephemeral=True
+                "🔒 Only the trader who posted this chart can log its result.", ephemeral=True
             )
             return
 
         if status == "COMPLETED" and current_result == result_type:
-            await interaction.response.send_message(f"Already logged as {result_type}.", ephemeral=True)
+            await interaction.response.send_message(f"✅ Already logged as **{result_type}**.", ephemeral=True)
             return
 
         await db.execute(
@@ -719,7 +735,7 @@ async def on_message(message: discord.Message):
         return
 
     if not await is_premium_member(message.author.id):
-        await message.channel.send(build_upgrade_message())
+        await message.channel.send(embed=build_upgrade_message())
         await bot.process_commands(message)
         return
 
@@ -737,13 +753,19 @@ async def on_message(message: discord.Message):
     attachment = image_attachments[0]
 
     if attachment.size and attachment.size > MAX_IMAGE_BYTES:
-        await message.channel.send(
-            f"⚠️ That image is too large to analyze (max {MAX_IMAGE_BYTES // (1024 * 1024)}MB)."
+        err_embed = discord.Embed(
+            description=f"⚠️ **File Too Large:** Max image size is `{MAX_IMAGE_BYTES // (1024 * 1024)}MB`.",
+            color=discord.Color.red()
         )
+        await message.channel.send(embed=err_embed)
         await bot.process_commands(message)
         return
 
-    processing_msg = await message.channel.send("🔍 **Reading chart...**")
+    proc_embed = discord.Embed(
+        description="🔍 **Analyzing chart data...**\n*Extracting strategy matching, session, and technical levels.*",
+        color=discord.Color.blue()
+    )
+    processing_msg = await message.channel.send(embed=proc_embed)
 
     try:
         image_bytes = await attachment.read()
@@ -808,7 +830,11 @@ async def on_message(message: discord.Message):
 
     except Exception as e:
         logging.error(f"Error during chart analysis: {e}")
-        await processing_msg.edit(content="❌ Couldn't analyze that chart right now. Please try again shortly.")
+        fail_embed = discord.Embed(
+            description="❌ **Error:** Couldn't analyze that chart right now. Please try again shortly.",
+            color=discord.Color.red()
+        )
+        await processing_msg.edit(content=None, embed=fail_embed)
 
     await bot.process_commands(message)
 
@@ -824,7 +850,7 @@ async def set_timezone(interaction: discord.Interaction, timezone_str: str):
     await interaction.response.defer(ephemeral=True)
 
     if not await is_premium_member(interaction.user.id):
-        await interaction.followup.send(build_upgrade_message(), ephemeral=True)
+        await interaction.followup.send(embed=build_upgrade_message(), ephemeral=True)
         return
 
     clean_tz = timezone_str.strip().upper()
@@ -837,8 +863,8 @@ async def set_timezone(interaction: discord.Interaction, timezone_str: str):
 
     embed = discord.Embed(
         title="✅ Timezone Updated",
-        description=f"Your chart timezone is now set to **{clean_tz}**. AI chart analysis will convert x-axis timestamps using this setting.",
-        color=discord.Color.green(),
+        description=f"Your chart timezone is now securely set to **`{clean_tz}`**.\n\n> AI chart analysis will now convert x-axis timestamps using this setting.",
+        color=discord.Color.brand_green(),
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -851,15 +877,15 @@ async def set_strategy(interaction: discord.Interaction, strategy: str):
     await interaction.response.defer(ephemeral=True)
 
     if not await is_premium_member(interaction.user.id):
-        await interaction.followup.send(build_upgrade_message(), ephemeral=True)
+        await interaction.followup.send(embed=build_upgrade_message(), ephemeral=True)
         return
 
     if len(strategy) > MAX_STRATEGY_LENGTH:
-        await interaction.followup.send(
-            f"⚠️ Your strategy is {len(strategy)} characters -- please keep it under "
-            f"{MAX_STRATEGY_LENGTH} so it doesn't bloat every chart analysis.",
-            ephemeral=True,
+        err_embed = discord.Embed(
+            description=f"⚠️ **Too Long:** Your strategy is `{len(strategy)}` characters. Please keep it under `{MAX_STRATEGY_LENGTH}` to prevent bloat during chart analysis.",
+            color=discord.Color.red()
         )
+        await interaction.followup.send(embed=err_embed, ephemeral=True)
         return
 
     await db.execute(
@@ -868,7 +894,11 @@ async def set_strategy(interaction: discord.Interaction, strategy: str):
         (interaction.user.id, strategy),
     )
 
-    embed = discord.Embed(title="✅ Strategy Updated", description=strategy, color=discord.Color.green())
+    embed = discord.Embed(
+        title="✅ Strategy Successfully Updated", 
+        description=f"> {strategy}", 
+        color=discord.Color.brand_green()
+    )
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
@@ -880,7 +910,7 @@ async def find_my_edge(interaction: discord.Interaction):
     await interaction.response.defer()
 
     if not await is_premium_member(interaction.user.id):
-        await interaction.followup.send(build_upgrade_message())
+        await interaction.followup.send(embed=build_upgrade_message())
         return
 
     trades = await db.fetchall(
@@ -890,10 +920,11 @@ async def find_my_edge(interaction: discord.Interaction):
     )
 
     if len(trades) < MIN_TRADES_FOR_EDGE:
-        await interaction.followup.send(
-            f"⚠️ You need at least **{MIN_TRADES_FOR_EDGE} completed trades** (out of your last "
-            f"{EDGE_LOOKBACK}) to run an edge analysis. Currently logged: `{len(trades)}`."
+        err_embed = discord.Embed(
+            description=f"⚠️ **Insufficient Data:** You need at least **`{MIN_TRADES_FOR_EDGE}` completed trades** (out of your last {EDGE_LOOKBACK}) to run an edge analysis. Currently logged: `{len(trades)}`.",
+            color=discord.Color.orange()
         )
+        await interaction.followup.send(embed=err_embed)
         return
 
     stats = compute_stats(trades)
@@ -941,7 +972,8 @@ async def find_my_edge(interaction: discord.Interaction):
         await interaction.followup.send(embed=embed)
     except Exception as e:
         logging.error(f"Error generating edge audit: {e}")
-        await interaction.followup.send("❌ Couldn't generate your edge audit right now. Please try again shortly.")
+        err_embed = discord.Embed(description="❌ **Error:** Couldn't generate your edge audit right now. Please try again shortly.", color=discord.Color.red())
+        await interaction.followup.send(embed=err_embed)
 
 
 @bot.tree.command(name="stats", description="View your overall trading statistics and performance metrics.")
@@ -951,7 +983,7 @@ async def stats_command(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     if not await is_premium_member(interaction.user.id):
-        await interaction.followup.send(build_upgrade_message(), ephemeral=True)
+        await interaction.followup.send(embed=build_upgrade_message(), ephemeral=True)
         return
 
     trades = await db.fetchall(
@@ -961,18 +993,20 @@ async def stats_command(interaction: discord.Interaction):
     )
 
     if not trades:
-        await interaction.followup.send("⚠️ You don't have any completed trades logged yet.", ephemeral=True)
+        err_embed = discord.Embed(description="⚠️ You don't have any completed trades logged yet.", color=discord.Color.orange())
+        await interaction.followup.send(embed=err_embed, ephemeral=True)
         return
 
     st = compute_stats(trades)
     embed = discord.Embed(title="📊 Your Trading Statistics", color=discord.Color.blue())
-    embed.add_field(name="Total Completed", value=str(st["total"]), inline=True)
-    embed.add_field(name="Win Rate", value=f"{st['win_rate']}%", inline=True)
-    embed.add_field(name="Record", value=f"{st['wins']}W / {st['losses']}L", inline=True)
+    embed.add_field(name="📝 Total Completed", value=f"`{st['total']}`", inline=True)
+    embed.add_field(name="🏆 Win Rate", value=f"`{st['win_rate']}%`", inline=True)
+    embed.add_field(name="⚖️ Record", value=f"`{st['wins']}W / {st['losses']}L`", inline=True)
+    
     if st["avg_rr_win"] is not None:
-        embed.add_field(name="Avg Win R:R", value=f"1:{st['avg_rr_win']}", inline=True)
+        embed.add_field(name="📈 Avg Win R:R", value=f"`1:{st['avg_rr_win']}`", inline=True)
     if st["avg_rr_loss"] is not None:
-        embed.add_field(name="Avg Loss R:R", value=f"1:{st['avg_rr_loss']}", inline=True)
+        embed.add_field(name="📉 Avg Loss R:R", value=f"`1:{st['avg_rr_loss']}`", inline=True)
 
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -985,7 +1019,7 @@ async def viewlogs_command(interaction: discord.Interaction, limit: int = 5):
     await interaction.response.defer(ephemeral=True)
 
     if not await is_premium_member(interaction.user.id):
-        await interaction.followup.send(build_upgrade_message(), ephemeral=True)
+        await interaction.followup.send(embed=build_upgrade_message(), ephemeral=True)
         return
 
     limit = max(1, min(limit, 10))
@@ -996,7 +1030,8 @@ async def viewlogs_command(interaction: discord.Interaction, limit: int = 5):
     )
 
     if not trades:
-        await interaction.followup.send("⚠️ You haven't logged any trades yet.", ephemeral=True)
+        err_embed = discord.Embed(description="⚠️ You haven't logged any trades yet.", color=discord.Color.orange())
+        await interaction.followup.send(embed=err_embed, ephemeral=True)
         return
 
     # Display recent trades in chronological order (oldest to newest)
@@ -1008,12 +1043,12 @@ async def viewlogs_command(interaction: discord.Interaction, limit: int = 5):
         res_display = res if res else status
         rr_text = f"1:{rr}" if rr is not None else "-"
         value = (
-            f"**Direction:** {dir_ or 'Unclear'} | **Result:** {res_display}\n"
-            f"**Entry:** {entry or '-'} | **SL:** {sl or '-'} | **TP:** {tp or '-'}\n"
-            f"**R:R:** {rr_text} | **Session:** {sess or '-'}\n"
-            f"**Note:** {note or '-'}"
+            f"> **Direction:** `{dir_ or '?'}` | **Result:** `{res_display}`\n"
+            f"> **Entry:** `{entry or '-'}` | **SL:** `{sl or '-'}` | **TP:** `{tp or '-'}`\n"
+            f"> **R:R:** `{rr_text}` | **Session:** `{sess or '-'}`\n"
+            f"> **Note:** {note or '-'}"
         )
-        embed.add_field(name=f"Trade #{idx}", value=value, inline=False)
+        embed.add_field(name=f"🔖 Trade #{idx}", value=value, inline=False)
 
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -1025,7 +1060,7 @@ async def deletelast_command(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     if not await is_premium_member(interaction.user.id):
-        await interaction.followup.send(build_upgrade_message(), ephemeral=True)
+        await interaction.followup.send(embed=build_upgrade_message(), ephemeral=True)
         return
 
     last_trade = await db.fetchone(
@@ -1034,7 +1069,8 @@ async def deletelast_command(interaction: discord.Interaction):
     )
 
     if not last_trade:
-        await interaction.followup.send("⚠️ You have no logged trades to delete.", ephemeral=True)
+        err_embed = discord.Embed(description="⚠️ You have no logged trades to delete.", color=discord.Color.orange())
+        await interaction.followup.send(embed=err_embed, ephemeral=True)
         return
 
     trade_id, message_id = last_trade
@@ -1044,14 +1080,16 @@ async def deletelast_command(interaction: discord.Interaction):
     try:
         msg = await interaction.channel.fetch_message(message_id)
         await msg.delete()
-        deleted_msg_note = " and deleted its message"
+        deleted_msg_note = " and deleted its original message."
     except Exception:
-        pass
+        deleted_msg_note = "."
 
-    await interaction.followup.send(
-        f"🗑️ Successfully deleted your most recent trade entry (ID: {trade_id}){deleted_msg_note}.",
-        ephemeral=True
+    success_embed = discord.Embed(
+        title="🗑️ Trade Deleted",
+        description=f"Successfully deleted your most recent trade entry `(ID: {trade_id})`{deleted_msg_note}",
+        color=discord.Color.green()
     )
+    await interaction.followup.send(embed=success_embed, ephemeral=True)
 
 
 @bot.tree.command(name="help", description="Show information about TradeSight AI commands and features.")
@@ -1065,37 +1103,37 @@ async def help_command(interaction: discord.Interaction):
     )
     embed.add_field(
         name="📷 Automatic Chart Logging",
-        value="Drop any chart screenshot in chat or DM to instantly log direction, entry, stop loss, take profit, and strategy matching.",
+        value="> Drop any chart screenshot in chat or DM to instantly log direction, entry, stop loss, take profit, and strategy matching.",
         inline=False
     )
     embed.add_field(
-        name="/settimezone",
-        value="Set your chart timezone (e.g., UTC, UTC+5:30, EST, IST) for accurate session detection.",
+        name="`/settimezone`",
+        value="> Set your chart timezone (e.g., UTC, UTC+5:30, EST, IST) for accurate session detection.",
         inline=False
     )
     embed.add_field(
-        name="/setstrategy",
-        value="Set your custom trading strategy rules and indicators for tailored analysis.",
+        name="`/setstrategy`",
+        value="> Set your custom trading strategy rules and indicators for tailored analysis.",
         inline=False
     )
     embed.add_field(
-        name="/findmyedge",
-        value="Analyze your last completed trades to uncover your core edge, primary leaks, and action plan.",
+        name="`/findmyedge`",
+        value="> Analyze your last completed trades to uncover your core edge, primary leaks, and action plan.",
         inline=False
     )
     embed.add_field(
-        name="/stats",
-        value="View your overall win rate, total completed trades, and average risk-to-reward metrics.",
+        name="`/stats`",
+        value="> View your overall win rate, total completed trades, and average risk-to-reward metrics.",
         inline=False
     )
     embed.add_field(
-        name="/viewlogs",
-        value="Review your recent trade history and logged details.",
+        name="`/viewlogs`",
+        value="> Review your recent trade history and visually logged details.",
         inline=False
     )
     embed.add_field(
-        name="/deletelast",
-        value="Remove your most recent trade entry from the database.",
+        name="`/deletelast`",
+        value="> Remove your most recent trade entry from the database.",
         inline=False
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -1104,16 +1142,16 @@ async def help_command(interaction: discord.Interaction):
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CommandOnCooldown):
-        message = f"⏳ Slow down -- you can run this again in {error.retry_after:.0f}s."
+        err_embed = discord.Embed(description=f"⏳ **Cooldown Active:** Please wait `{error.retry_after:.0f}s` before running this again.", color=discord.Color.orange())
     else:
         logging.error(f"Unhandled app command error: {error}")
-        message = "❌ Something went wrong running that command."
+        err_embed = discord.Embed(description="❌ **System Error:** Something went wrong while running that command.", color=discord.Color.red())
 
     try:
         if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
+            await interaction.followup.send(embed=err_embed, ephemeral=True)
         else:
-            await interaction.response.send_message(message, ephemeral=True)
+            await interaction.response.send_message(embed=err_embed, ephemeral=True)
     except Exception:
         pass
 
