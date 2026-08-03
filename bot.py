@@ -78,11 +78,12 @@ MAX_STRATEGY_LENGTH = 500
 MIN_TRADES_FOR_EDGE = 3
 EDGE_LOOKBACK = 10
 
-# Everything is free except /findmyedge -- chart analysis is capped (lifetime, not
-# per-day) since it's the one feature that costs real Gemini API money per use, and
-# a lifetime cap bounds worst-case free-tier cost far better than a recurring daily
-# allowance would (which grows forever as the free user base grows).
-FREE_CHART_ANALYSIS_LIMIT = 3
+# Everything is free except /findmyedge (and even that gets one free run) -- chart analysis
+# is capped (lifetime, not per-day) since it's the one feature that costs real Gemini API
+# money per use. The cap needs enough headroom that a free user can realistically log AND
+# close out 3+ trades (MIN_TRADES_FOR_EDGE) to actually reach their one free edge audit --
+# too low a cap means the free tier can structurally never demonstrate the paid feature.
+FREE_CHART_ANALYSIS_LIMIT = 5
 
 TILT_CONSECUTIVE_LOSS_THRESHOLD = 3
 TILT_DAILY_LOSS_LIMIT_R = -3.0
@@ -156,7 +157,8 @@ SQLITE_USERS_TABLE = """
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     chart_timezone TEXT DEFAULT 'UTC',
-    free_charts_used INTEGER DEFAULT 0
+    free_charts_used INTEGER DEFAULT 0,
+    used_free_edge_audit INTEGER DEFAULT 0
 )
 """
 SQLITE_TRADES_TABLE = """
@@ -188,7 +190,8 @@ PG_USERS_TABLE = """
 CREATE TABLE IF NOT EXISTS users (
     user_id BIGINT PRIMARY KEY,
     chart_timezone TEXT DEFAULT 'UTC',
-    free_charts_used INTEGER DEFAULT 0
+    free_charts_used INTEGER DEFAULT 0,
+    used_free_edge_audit INTEGER DEFAULT 0
 )
 """
 PG_TRADES_TABLE = """
@@ -250,6 +253,12 @@ class Database:
                     )
                 except Exception:
                     pass
+                try:
+                    await conn.execute(
+                        "ALTER TABLE users ADD COLUMN IF NOT EXISTS used_free_edge_audit INTEGER DEFAULT 0"
+                    )
+                except Exception:
+                    pass
         else:
             await self._connect_sqlite()
             await self.sqlite_conn.execute(SQLITE_STRATEGIES_TABLE)
@@ -263,6 +272,12 @@ class Database:
             try:
                 await self.sqlite_conn.execute(
                     "ALTER TABLE users ADD COLUMN free_charts_used INTEGER DEFAULT 0"
+                )
+            except Exception:
+                pass
+            try:
+                await self.sqlite_conn.execute(
+                    "ALTER TABLE users ADD COLUMN used_free_edge_audit INTEGER DEFAULT 0"
                 )
             except Exception:
                 pass
@@ -422,7 +437,9 @@ def build_free_limit_reached_embed() -> discord.Embed:
         description=(
             f"You've used all **{FREE_CHART_ANALYSIS_LIMIT} free chart analyses**. "
             "Subscribe to TradeSight AI for unlimited chart logging, strategy matching, "
-            "risk protection, and edge audits."
+            "risk protection, and edge audits.\n\n"
+            f"Already got {MIN_TRADES_FOR_EDGE}+ completed trades logged? Run `/findmyedge` -- "
+            "your first pattern audit is free."
         ),
         color=discord.Color.dark_theme()
     )
@@ -440,6 +457,19 @@ async def increment_free_charts_used(user_id: int):
     await db.execute(
         "INSERT INTO users (user_id, free_charts_used) VALUES (?, 1) "
         "ON CONFLICT(user_id) DO UPDATE SET free_charts_used = COALESCE(free_charts_used, 0) + 1",
+        (user_id,),
+    )
+
+
+async def has_used_free_edge_audit(user_id: int) -> bool:
+    row = await db.fetchone("SELECT used_free_edge_audit FROM users WHERE user_id = ?", (user_id,))
+    return bool(row[0]) if row and row[0] is not None else False
+
+
+async def mark_free_edge_audit_used(user_id: int):
+    await db.execute(
+        "INSERT INTO users (user_id, used_free_edge_audit) VALUES (?, 1) "
+        "ON CONFLICT(user_id) DO UPDATE SET used_free_edge_audit = 1",
         (user_id,),
     )
 
@@ -1288,11 +1318,6 @@ async def on_message(message: discord.Message):
         analysis_msg = await message.channel.send(embed=embed)
         await processing_msg.delete()
 
-        # Only charge the free quota once analysis actually succeeded and was delivered --
-        # a failed Gemini call above would have already jumped to the except block below.
-        if not is_premium:
-            await increment_free_charts_used(message.author.id)
-
     except Exception as e:
         logging.error(f"Error during chart analysis: {e}")
         fail_embed = discord.Embed(
@@ -1305,6 +1330,16 @@ async def on_message(message: discord.Message):
             logging.error(f"Could not edit processing_msg after analysis failure: {edit_err}")
         await bot.process_commands(message)
         return
+
+    # Free-quota bookkeeping is isolated in its own try/except -- it must never be able to
+    # block phase 2 below. If this were inside the block above, a failure here (after
+    # processing_msg is already deleted) would silently prevent the trade from ever being
+    # saved or getting its Win/Loss/Breakeven buttons, and only for non-premium users.
+    if not is_premium:
+        try:
+            await increment_free_charts_used(message.author.id)
+        except Exception as inc_err:
+            logging.error(f"Could not increment free_charts_used for {message.author.id}: {inc_err}")
 
     # Phase 2: persist the trade (with a real wall-clock UTC timestamp, used only by the
     # tilt system) and only then make the Win/Loss/Breakeven buttons live. If this fails,
@@ -1414,7 +1449,8 @@ async def set_strategy(interaction: discord.Interaction):
 async def find_my_edge(interaction: discord.Interaction):
     await interaction.response.defer()
 
-    if not await is_premium_member(interaction.user.id):
+    is_premium = await is_premium_member(interaction.user.id)
+    if not is_premium and await has_used_free_edge_audit(interaction.user.id):
         await interaction.followup.send(embed=build_upgrade_message())
         return
 
@@ -1478,6 +1514,15 @@ async def find_my_edge(interaction: discord.Interaction):
         response = await call_gemini(prompt)
         sections = parse_edge_sections(response.text or "")
         embed = build_edge_embed(interaction.user, stats, sections, len(trades))
+
+        if not is_premium:
+            current_footer = embed.footer.text or ""
+            embed.set_footer(text=f"{current_footer} • This was your one free edge audit -- subscribe for unlimited.")
+            try:
+                await mark_free_edge_audit_used(interaction.user.id)
+            except Exception as mark_err:
+                logging.error(f"Could not mark free edge audit used for {interaction.user.id}: {mark_err}")
+
         await interaction.followup.send(embed=embed)
     except Exception as e:
         logging.error(f"Error generating edge audit: {e}")
@@ -1622,8 +1667,12 @@ async def help_command(interaction: discord.Interaction):
         inline=False
     )
     embed.add_field(
-        name="`/findmyedge` — 🔒 Premium",
-        value="> Analyze your last completed trades to uncover your core edge, primary leaks, and action plan.",
+        name="`/findmyedge` — 1 Free Run, Then 🔒 Premium",
+        value=(
+            f"> Analyze your last completed trades to uncover your core edge, primary leaks, "
+            f"and action plan. Needs {MIN_TRADES_FOR_EDGE}+ completed trades. Free accounts get "
+            "**one** free audit; Premium is unlimited."
+        ),
         inline=False
     )
     embed.add_field(
