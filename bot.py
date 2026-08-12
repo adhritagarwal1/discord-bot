@@ -836,6 +836,27 @@ def compute_stats(trades: list) -> dict:
             if v["total"] >= 2 and k != "Unclear"
         }
 
+    def cross_breakdown(idx_a, idx_b):
+        """Direction x session, e.g. -- gives a conditional pattern ("Long/London wins more")
+        instead of a blunt direction-only one ("Long wins more"), since daily bias isn't fixed
+        and a direction-only rule is never actually actionable advice.
+        """
+        counts = {}
+        for t in trades:
+            key_a, key_b = t[idx_a] or "Unclear", t[idx_b] or "Unclear"
+            if key_a == "Unclear" or key_b == "Unclear":
+                continue
+            key = f"{key_a}/{key_b}"
+            counts.setdefault(key, {"wins": 0, "total": 0})
+            counts[key]["total"] += 1
+            if t[0] == "WIN":
+                counts[key]["wins"] += 1
+        return {
+            k: round(v["wins"] / v["total"] * 100, 1)
+            for k, v in counts.items()
+            if v["total"] >= 2
+        }
+
     rr_win = [t[7] for t in wins if t[7] is not None]
     rr_loss = [t[7] for t in losses if t[7] is not None]
 
@@ -846,6 +867,7 @@ def compute_stats(trades: list) -> dict:
         "win_rate": win_rate,
         "direction_breakdown": breakdown(1),
         "session_breakdown": breakdown(6),
+        "direction_session_breakdown": cross_breakdown(1, 6),
         "avg_rr_win": round(sum(rr_win) / len(rr_win), 2) if rr_win else None,
         "avg_rr_loss": round(sum(rr_loss) / len(rr_loss), 2) if rr_loss else None,
     }
@@ -870,7 +892,7 @@ def build_trade_embed(user, t: dict, session: str, risk_reward, result: str = No
 
     embed.add_field(name="🧭 Direction", value=f"`{t['direction']}`", inline=True)
     embed.add_field(name="🕒 Session", value=f"`{session or 'Unclear'}`", inline=True)
-    embed.add_field(name="⚖️ R:R", value=f"`1:{risk_reward}`" if risk_reward else "`—`", inline=True)
+    embed.add_field(name="⚖️ R:R", value=f"`1:{risk_reward:.2f}`" if risk_reward else "`—`", inline=True)
 
     embed.add_field(name="🟢 Entry", value=f"`{t['entry']}`", inline=True)
     embed.add_field(name="🔴 Stop Loss", value=f"`{t['stop_loss']}`", inline=True)
@@ -915,9 +937,9 @@ def build_edge_embed(user, stats: dict, sections: dict, trades_count: int) -> di
         inline=True
     )
     if stats["avg_rr_win"] is not None:
-        embed.add_field(name="📈 Avg R:R (Wins)", value=f"`1:{stats['avg_rr_win']}`", inline=True)
+        embed.add_field(name="📈 Avg R:R (Wins)", value=f"`1:{stats['avg_rr_win']:.2f}`", inline=True)
     if stats["avg_rr_loss"] is not None:
-        embed.add_field(name="📉 Avg R:R (Losses)", value=f"`1:{stats['avg_rr_loss']}`", inline=True)
+        embed.add_field(name="📉 Avg R:R (Losses)", value=f"`1:{stats['avg_rr_loss']:.2f}`", inline=True)
 
     embed.add_field(name="🎯 Core Edge", value=f"> {_truncate(sections.get('core_edge'))}", inline=False)
     embed.add_field(name="🕳️ Primary Leak", value=f"> {_truncate(sections.get('primary_leak'))}", inline=False)
@@ -1037,7 +1059,7 @@ class TradeLogPaginator(discord.ui.View):
         for idx, t in enumerate(page_items, start=start_idx + 1):
             res, dir_, entry, sl, tp, note, sess, rr, status = t
             res_display = res if res else status
-            rr_text = f"1:{rr}" if rr is not None else "-"
+            rr_text = f"1:{rr:.2f}" if rr is not None else "-"
             value = (
                 f"> **Direction:** `{dir_ or '?'}` | **Result:** `{res_display}`\n"
                 f"> **Entry:** `{entry or '-'}` | **SL:** `{sl or '-'}` | **TP:** `{tp or '-'}`\n"
@@ -1476,7 +1498,7 @@ async def find_my_edge(interaction: discord.Interaction):
 
     lines = []
     for idx, (result, direction, entry, sl, tp, note, session, rr) in enumerate(reversed(trades), 1):
-        rr_text = f"1:{rr}" if rr is not None else "-"
+        rr_text = f"1:{rr:.2f}" if rr is not None else "-"
         lines.append(
             f"#{idx} [{result}] {direction or 'Unclear'} | Entry {entry or '-'} | SL {sl or '-'} | "
             f"TP {tp or '-'} | R:R {rr_text} | {session or '-'} | {note or ''}"
@@ -1492,10 +1514,15 @@ async def find_my_edge(interaction: discord.Interaction):
         stats_lines.append(
             "Win rate by session: " + ", ".join(f"{k} {v}%" for k, v in stats["session_breakdown"].items())
         )
+    if stats["direction_session_breakdown"]:
+        stats_lines.append(
+            "Win rate by direction+session combo: "
+            + ", ".join(f"{k} {v}%" for k, v in stats["direction_session_breakdown"].items())
+        )
     if stats["avg_rr_win"] is not None:
-        stats_lines.append(f"Average R:R on wins: 1:{stats['avg_rr_win']}")
+        stats_lines.append(f"Average R:R on wins: 1:{stats['avg_rr_win']:.2f}")
     if stats["avg_rr_loss"] is not None:
-        stats_lines.append(f"Average R:R on losses: 1:{stats['avg_rr_loss']}")
+        stats_lines.append(f"Average R:R on losses: 1:{stats['avg_rr_loss']:.2f}")
     stats_block = "\n".join(stats_lines)
 
     prompt = (
@@ -1503,11 +1530,17 @@ async def find_my_edge(interaction: discord.Interaction):
         f"{len(trades)} completed trades), find their edge.\n\n"
         f"STATS:\n{stats_block}\n\n"
         f"TRADES (most recent first):\n{trade_block}\n\n"
+        "IMPORTANT CONSTRAINT: Daily market bias (Long vs Short) changes day to day and is NOT a "
+        "fixed trait of this trader -- never conclude or recommend 'only take Long trades' or "
+        "'avoid Short trades' as a standalone rule. If direction shows a win-rate gap, only surface "
+        "it combined with another factor already in the data (e.g. session, R:R, strategy match) -- "
+        "e.g. 'your Long setups during London session win more than your Shorts outside London' is "
+        "fine; 'stop taking Shorts' is not, because it ignores that bias is set fresh each day.\n\n"
         "Respond in exactly this format, with no extra commentary before or after:\n"
         "CORE_EDGE: <2-3 sentences on the common condition behind the winning trades>\n"
         "PRIMARY_LEAK: <2-3 sentences on the common condition behind the losing trades>\n"
         "ACTION_PLAN: <2 specific, concrete rules to improve win rate, separated by ' | '>\n"
-        "Do not suggest any new trades."
+        "Do not suggest any new trades. Do not recommend avoiding an entire direction (Long or Short)."
     )
 
     try:
@@ -1559,9 +1592,9 @@ async def stats_command(interaction: discord.Interaction):
     embed.add_field(name="⚖️ Record", value=f"`{st['wins']}W / {st['losses']}L`", inline=True)
 
     if st["avg_rr_win"] is not None:
-        embed.add_field(name="📈 Avg Win R:R", value=f"`1:{st['avg_rr_win']}`", inline=True)
+        embed.add_field(name="📈 Avg Win R:R", value=f"`1:{st['avg_rr_win']:.2f}`", inline=True)
     if st["avg_rr_loss"] is not None:
-        embed.add_field(name="📉 Avg Loss R:R", value=f"`1:{st['avg_rr_loss']}`", inline=True)
+        embed.add_field(name="📉 Avg Loss R:R", value=f"`1:{st['avg_rr_loss']:.2f}`", inline=True)
 
     await interaction.followup.send(embed=embed, ephemeral=True)
 
