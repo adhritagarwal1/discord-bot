@@ -259,6 +259,11 @@ class Database:
                     )
                 except Exception:
                     pass
+                # Every trades query filters by user_id, most also filter status -- this index
+                # keeps lookups fast as history grows instead of degrading to a full table scan.
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_trades_user_status ON trades (user_id, status)"
+                )
         else:
             await self._connect_sqlite()
             await self.sqlite_conn.execute(SQLITE_STRATEGIES_TABLE)
@@ -281,6 +286,10 @@ class Database:
                 )
             except Exception:
                 pass
+            # Same reasoning as the Postgres branch -- keeps per-user lookups fast at scale.
+            await self.sqlite_conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_user_status ON trades (user_id, status)"
+            )
             await self.sqlite_conn.commit()
 
             # Best-effort: reformat legacy (pre-UTC-ISO) timestamp strings so lexicographic
@@ -743,6 +752,13 @@ def build_chart_prompt(user_strategy: str, user_timezone: str) -> str:
         "- Disqualify (matches_strategy = false) ONLY if a visible execution rule on the "
         "chart is broken or missing (e.g., wrong session, missing FVG/sweep, bad R:R, "
         "invalid trigger).\n\n"
+        "NOTE FIELD -- GROUNDING RULE: The note must describe ONLY what is literally visible "
+        "on the chart -- a drawn support/resistance line that price actually reacted to, a "
+        "marked zone, a visible wick/rejection, an indicator plotted on the chart, etc. Do "
+        "NOT invent, assume, or guess at any pattern, level, or concept that is not visibly "
+        "present in the image, even if it would sound like a plausible reason. If you cannot "
+        "identify a clear, visible reason for the entry, the note must say 'No clear visual "
+        "entry trigger identified' instead of inventing one.\n\n"
         "Return ONLY valid JSON with exactly these keys, no other text:\n"
         '{"direction": "Long" | "Short" | "Unclear", '
         '"entry": "<price as text, or Unclear>", '
@@ -751,8 +767,9 @@ def build_chart_prompt(user_strategy: str, user_timezone: str) -> str:
         '"session": "<Asia | London | New York | Asia/London | London/New York | Off-hours | Unclear>", '
         '"matches_strategy": true | false, '
         '"note": "<Max 15 words. If false, state EXACTLY which visible execution rule '
-        "failed. If true, describe the entry trigger/rationale directly (e.g., 'Valid entry "
-        "at 15m FVG after liquidity sweep').>\"}"
+        "failed. If true, describe ONLY the visible reason for entry (e.g., 'Price respected "
+        "the marked resistance zone' or 'Rejection wick off the drawn support line'). If no "
+        "visible reason is identifiable, say so instead of guessing.>\"}"
     )
 
 
@@ -1013,6 +1030,7 @@ class TradeLogPaginator(discord.ui.View):
         self.selected_filter = "ALL"
         self.filtered_trades = list(all_trades)
         self.current_page = 0
+        self.message = None  # set right after sending; on_timeout guards on this being set
 
         self.add_item(TradeLogFilterSelect())
 
@@ -1605,9 +1623,11 @@ async def stats_command(interaction: discord.Interaction):
 async def viewlogs_command(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
+    # Bounded, unlike /stats -- nobody pages through hundreds of trades 3-at-a-time, so this
+    # just caps query/memory cost as history grows without changing what the command shows.
     trades = await db.fetchall(
         "SELECT result, direction, entry, stop_loss, take_profit, note, session, risk_reward, status "
-        "FROM trades WHERE user_id = ? ORDER BY id DESC",
+        "FROM trades WHERE user_id = ? ORDER BY id DESC LIMIT 200",
         (interaction.user.id,),
     )
 
