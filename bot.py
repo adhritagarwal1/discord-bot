@@ -67,7 +67,7 @@ except ValueError:
 
 genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_MODEL = "gemini-3.7-flash"
 GEMINI_MAX_RETRIES = 2  # total attempts = this + 1, with exponential backoff
 
 CHART_COOLDOWN_SECONDS = 15
