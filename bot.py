@@ -68,6 +68,9 @@ except ValueError:
 genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 GEMINI_MODEL = "gemini-3.7-flash"
+GEMINI_FALLBACK_MODEL = "gemini-3.6-flash"  # tried once if the primary model fails all retries --
+                                             # protects against capacity issues on a newly-launched
+                                             # model without giving up the better model entirely
 GEMINI_MAX_RETRIES = 2  # total attempts = this + 1, with exponential backoff
 
 CHART_COOLDOWN_SECONDS = 15
@@ -708,7 +711,18 @@ async def call_gemini(contents, config=None):
             logging.warning(f"Gemini call failed (attempt {attempt + 1}/{GEMINI_MAX_RETRIES + 1}): {e}")
             if attempt < GEMINI_MAX_RETRIES:
                 await asyncio.sleep(2 ** attempt)
-    raise last_err
+
+    # Primary model exhausted its retries -- try the fallback once before giving up entirely.
+    # Most calls still get the primary model whenever it's healthy; this only kicks in when
+    # it's genuinely struggling (e.g. launch-week capacity strain on a brand-new model).
+    try:
+        logging.warning(f"Falling back to {GEMINI_FALLBACK_MODEL} after {GEMINI_MODEL} failed all retries.")
+        return await genai_client.aio.models.generate_content(
+            model=GEMINI_FALLBACK_MODEL, contents=contents, config=config
+        )
+    except Exception as fallback_err:
+        logging.error(f"Fallback model {GEMINI_FALLBACK_MODEL} also failed: {fallback_err}")
+        raise last_err
 
 
 def build_chart_prompt(user_strategy: str, user_timezone: str) -> str:
@@ -742,6 +756,38 @@ def build_chart_prompt(user_strategy: str, user_timezone: str) -> str:
         "   If overlapping, combine them with a slash, e.g. 'Asia/London' or 'London/New "
         "York'. If off-hours, use 'Off-hours'. If the time on the chart is not clearly "
         "readable, use 'Unclear' -- do not guess.\n\n"
+        "CHART ANNOTATION TOOLS -- CHECK FOR THESE FIRST, before falling back to Unclear:\n"
+        "- LONG/SHORT POSITION TOOL: traders often mark a planned or taken trade with "
+        "TradingView's Position tool -- a vertical box split by a horizontal line into two "
+        "colored zones, usually with exact prices labeled on it. The horizontal dividing "
+        "line is the ENTRY price. The zone on the losing side is the STOP LOSS (above entry "
+        "= Short's stop, below entry = Long's stop). The zone on the winning side is the "
+        "TAKE PROFIT. If this tool is present, read entry/stop_loss/take_profit directly "
+        "from its labeled prices, and set direction based on which side the profit zone is "
+        "on (profit zone below entry = Short, above entry = Long).\n"
+        "- RECTANGLE / BOX / LINE drawings: these usually mark a support or resistance zone. "
+        "If price is visibly reacting to one (bouncing off it, rejecting from it, breaking "
+        "through it), that IS a valid, visible entry reason -- describe it plainly, e.g. "
+        "'Price respected the marked resistance zone.'\n"
+        "- IMPORTANT: a chart can have BOTH a position tool AND a separate support/resistance "
+        "drawing at the same time -- these are two different things and must be checked "
+        "independently. The position tool tells you the entry/SL/TP NUMBERS. It does NOT by "
+        "itself tell you WHY that entry was valid. Always separately look for any other zone, "
+        "line, or level near the entry price that price is reacting to, and use THAT as the "
+        "note/reason -- do not stop looking just because the position tool gave you numbers.\n"
+        "- TELLING THEM APART when they overlap or share a similar color: use STRUCTURE, not "
+        "color, since colors vary by user. The Position tool is always split into exactly TWO "
+        "differently-colored sub-zones by one horizontal line (the entry price) -- that split "
+        "is inherent to the tool itself (one side is loss, one side is profit) and you already "
+        "read it as SL/TP. A support/resistance zone is structurally different: a SINGLE "
+        "uniform-colored region with NO internal dividing line, marking one price level, not a "
+        "risk/reward split. If you see a solid, undivided colored region overlapping or beside "
+        "the position tool, that is a separate support/resistance zone -- name it in the note "
+        "as its own reason, don't fold it into the position tool's SL/TP zones.\n"
+        "- Only fall back to 'Unclear' / 'No clear visual entry trigger identified' if, after "
+        "checking for a position tool, any drawn zone/line near the entry, and a clear "
+        "candlestick-based trigger (FVG, liquidity sweep, structure break), none of them are "
+        "actually present in the image.\n\n"
         "STRATEGY AUDIT INSTRUCTIONS:\n"
         "- Focus strictly on auditing VISIBLE execution rules (entry model, trigger, stop "
         "loss/take profit levels, market structure, timing/session).\n"
